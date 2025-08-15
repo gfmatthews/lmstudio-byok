@@ -1,0 +1,94 @@
+{
+	"name": "lmstudio-byok-chat-provider",
+	"enabledApiProposals": [
+		"chatProvider"
+	],
+	"publisher": "pierceboggan",
+	"displayName": "LM Studio BYOK Chat Provider",
+	"description": "Bring your own LM Studio instance to use local LLM models in GitHub Copilot Chat.",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/pierceboggan/fireworks-byok"
+	},
+	"version": "0.1.0",
+	"engines": {
+		"vscode": "^1.103.0-20250721"
+	},
+	"categories": [
+		"AI",
+		"Chat"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"contributes": {
+		"languageModels": [
+			{
+				"vendor": "lmstudio",
+				"displayName": "LM Studio"
+			}
+		],
+		"commands": [
+			{
+				"command": "lmstudio.refreshModels",
+				"title": "Refresh Available Models",
+				"category": "LM Studio"
+			},
+			{
+				"command": "lmstudio.testConnection",
+				"title": "Test Connection",
+				"category": "LM Studio"
+			},
+			{
+				"command": "lmstudio.showWelcome",
+				"title": "Show Welcome",
+				"category": "LM Studio"
+			}
+		],
+		"configuration": {
+			"title": "LM Studio",
+			"properties": {
+				"lmstudio.baseUrl": {
+					"type": "string",
+					"default": "http://localhost:1234",
+					"description": "The base URL for your LM Studio server. Default is http://localhost:1234"
+				},
+				"lmstudio.apiKey": {
+					"type": "string",
+					"description": "Your LM Studio API key (optional for local instances). You can also set this via the LMSTUDIO_API_KEY environment variable.",
+					"scope": "application"
+				},
+				"lmstudio.verboseLogging": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable verbose diagnostic logging to the 'LM Studio' output channel for troubleshooting.",
+					"scope": "application"
+				}
+			}
+		}
+	},
+	"main": "./out/extension.js",
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"download-api": "dts dev",
+		"postdownload-api": "dts main",
+		"postinstall": "npm run download-api",
+		"compile": "tsc -p ./",
+		"lint": "eslint",
+		"watch": "tsc -watch -p ./"
+	},
+	"dependencies": {
+		"@lmstudio/sdk": "^1.4.0",
+		"gpt-tokenizer": "^3.0.1"
+	},
+	"devDependencies": {
+		"@eslint/js": "^9.13.0",
+		"@stylistic/eslint-plugin": "^2.9.0",
+		"@types/node": "^22",
+		"@types/vscode": "^1.102.0",
+		"@vscode/dts": "^0.4.1",
+		"eslint": "^9.13.0",
+		"typescript": "^5.8.2",
+		"typescript-eslint": "^8.26.0"
+	}
+}
