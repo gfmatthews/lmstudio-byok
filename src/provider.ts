@@ -86,29 +86,13 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 
 		// Create new client with current settings
 		try {
-			this.log(`Creating client with baseUrl: ${baseUrl}`);
+			// The SDK requires a ws:// or wss:// URL. Always provide an explicit
+			// baseUrl to prevent the SDK's auto-discovery port scanning, which
+			// fires unhandled promise rejections that crash the extension host.
+			const wsUrl = this.toWebSocketUrl(baseUrl);
+			this.log(`Creating client with baseUrl: ${wsUrl}`);
 
-			// Create client options with proper configuration
-			const clientOptions: { baseUrl?: string; apiKey?: string } = {};
-
-			// Only set baseUrl if it's not the default localhost:1234
-			if (baseUrl !== 'http://localhost:1234') {
-				clientOptions.baseUrl = baseUrl;
-				this.log(`Using custom base URL: ${baseUrl}`);
-			}
-
-			// Add API key if provided
-			if (apiKey) {
-				clientOptions.apiKey = apiKey;
-				this.log('Using API key for authentication');
-			} else {
-				this.log('No API key provided (OK for local instances)');
-			}
-
-			// Create client - if no custom options, use default constructor
-			this.client = Object.keys(clientOptions).length > 0
-				? new LMStudioClient(clientOptions)
-				: new LMStudioClient();
+			this.client = new LMStudioClient({ baseUrl: wsUrl });
 			this.lastBaseUrl = baseUrl;
 			this.lastApiKey = apiKey;
 
@@ -120,6 +104,16 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 			this.lastBaseUrl = null;
 			this.lastApiKey = null;
 			return null;
+		}
+	}
+
+	private toWebSocketUrl(httpUrl: string): string {
+		try {
+			const url = new URL(httpUrl);
+			const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+			return `${wsProtocol}//${url.host}`;
+		} catch {
+			return 'ws://127.0.0.1:1234';
 		}
 	}
 
