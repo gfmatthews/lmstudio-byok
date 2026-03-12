@@ -1,47 +1,73 @@
 import * as vscode from 'vscode';
-import { LMStudioChatModelProvider } from './provider';
 
 export function activate(context: vscode.ExtensionContext) {
-	const provider = new LMStudioChatModelProvider();
+	let provider: import('./provider').LMStudioChatModelProvider | null = null;
 
-	// Register commands FIRST so they are always available even if
-	// the language model provider registration fails.
-	const refreshCommand = vscode.commands.registerCommand('lmstudio.refreshModels', () => {
-		provider.refreshModels();
-		vscode.window.showInformationMessage('LM Studio models refreshed');
-	});
-	context.subscriptions.push(refreshCommand);
+	// Register ALL commands first, before any provider construction or SDK
+	// imports. This guarantees commands are always available even if the
+	// provider module or @lmstudio/sdk fails to load at runtime.
 
-	const testConnectionCommand = vscode.commands.registerCommand('lmstudio.testConnection', async () => {
-		try {
-			const models = await provider.provideLanguageModelChatInformation({ silent: false }, new vscode.CancellationTokenSource().token);
+	context.subscriptions.push(
+		vscode.commands.registerCommand('lmstudio.showWelcome', () => {
+			showWelcomePage();
+		})
+	);
 
-			if (models.some(m => m.id === 'connection-error' || m.id === 'no-models-loaded' || m.id === 'server-not-started')) {
-				vscode.window.showErrorMessage(`LM Studio connection failed. Found: ${models.map(m => m.name).join(', ')}`);
-			} else {
-				vscode.window.showInformationMessage(`LM Studio connected successfully! Found ${models.length} models: ${models.map(m => m.name).join(', ')}`);
+	context.subscriptions.push(
+		vscode.commands.registerCommand('lmstudio.refreshModels', () => {
+			if (!provider) {
+				vscode.window.showErrorMessage('LM Studio: Provider not initialized. Check the "LM Studio" output channel for details.');
+				return;
 			}
-		} catch (error) {
-			vscode.window.showErrorMessage(`LM Studio connection test failed: ${error}`);
-		}
-	});
-	context.subscriptions.push(testConnectionCommand);
+			provider.refreshModels();
+			vscode.window.showInformationMessage('LM Studio models refreshed');
+		})
+	);
 
-	const showWelcomeCommand = vscode.commands.registerCommand('lmstudio.showWelcome', () => {
-		showWelcomePage();
-	});
-	context.subscriptions.push(showWelcomeCommand);
+	context.subscriptions.push(
+		vscode.commands.registerCommand('lmstudio.testConnection', async () => {
+			if (!provider) {
+				vscode.window.showErrorMessage('LM Studio: Provider not initialized. Check the "LM Studio" output channel for details.');
+				return;
+			}
+			try {
+				const models = await provider.provideLanguageModelChatInformation({ silent: false }, new vscode.CancellationTokenSource().token);
 
-	// Register the chat model provider (after commands, so a failure here
-	// does not prevent commands from working).
+				if (models.some(m => m.id === 'connection-error' || m.id === 'no-models-loaded' || m.id === 'server-not-started')) {
+					vscode.window.showErrorMessage(`LM Studio connection failed. Found: ${models.map(m => m.name).join(', ')}`);
+				} else {
+					vscode.window.showInformationMessage(`LM Studio connected successfully! Found ${models.length} models: ${models.map(m => m.name).join(', ')}`);
+				}
+			} catch (error) {
+				vscode.window.showErrorMessage(`LM Studio connection test failed: ${error}`);
+			}
+		})
+	);
+
+	// Now attempt to load the provider module and create the provider.
+	// This is done after command registration so a failure here (e.g.
+	// @lmstudio/sdk fails to load) never causes "command not found".
 	try {
-		const disposable = vscode.lm.registerLanguageModelChatProvider('lmstudio', provider);
-		context.subscriptions.push(disposable);
+		// eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy require to avoid module-level failure
+		const { LMStudioChatModelProvider } = require('./provider') as typeof import('./provider');
+		provider = new LMStudioChatModelProvider();
 	} catch (error) {
 		vscode.window.showErrorMessage(
-			`LM Studio: Failed to register language model provider. ` +
-			`Make sure you are running VS Code 1.110+ and have GitHub Copilot installed. Error: ${error}`
+			`LM Studio: Failed to initialize provider. Error: ${error}`
 		);
+	}
+
+	// Register the chat model provider with VS Code.
+	if (provider) {
+		try {
+			const disposable = vscode.lm.registerLanguageModelChatProvider('lmstudio', provider);
+			context.subscriptions.push(disposable);
+		} catch (error) {
+			vscode.window.showErrorMessage(
+				`LM Studio: Failed to register language model provider. ` +
+				`Make sure you are running VS Code 1.110+ and have GitHub Copilot installed. Error: ${error}`
+			);
+		}
 	}
 
 	// Show welcome page on first activation (with a small delay to ensure UI is ready)
