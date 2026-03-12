@@ -1,12 +1,10 @@
 import * as vscode from 'vscode';
+import { LMStudioChatModelProvider } from './provider';
 
 export function activate(context: vscode.ExtensionContext) {
-	let provider: import('./provider').LMStudioChatModelProvider | null = null;
+	let provider: LMStudioChatModelProvider | null = null;
 
-	// Register ALL commands first, before any provider construction or SDK
-	// imports. This guarantees commands are always available even if the
-	// provider module or @lmstudio/sdk fails to load at runtime.
-
+	// Register commands first so they are always available.
 	context.subscriptions.push(
 		vscode.commands.registerCommand('lmstudio.showWelcome', () => {
 			showWelcomePage();
@@ -44,12 +42,8 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
-	// Now attempt to load the provider module and create the provider.
-	// This is done after command registration so a failure here (e.g.
-	// @lmstudio/sdk fails to load) never causes "command not found".
+	// Create the provider.
 	try {
-		// eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy require to avoid module-level failure
-		const { LMStudioChatModelProvider } = require('./provider') as typeof import('./provider');
 		provider = new LMStudioChatModelProvider();
 	} catch (error) {
 		vscode.window.showErrorMessage(
