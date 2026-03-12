@@ -1,5 +1,5 @@
-import { CancellationToken, LanguageModelChatMessage, LanguageModelChatMessageRole, LanguageModelTextPart, LanguageModelToolCallPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel } from "vscode";
-import { ChatResponseFragment2, LanguageModelChatInformation, LanguageModelChatProvider2, LanguageModelChatRequestHandleOptions } from "vscode";
+import { CancellationToken, LanguageModelChatMessageRole, LanguageModelTextPart, LanguageModelToolCallPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel } from "vscode";
+import { LanguageModelChatInformation, LanguageModelChatProvider, LanguageModelChatRequestMessage, LanguageModelResponsePart, ProvideLanguageModelChatResponseOptions, PrepareLanguageModelChatModelOptions } from "vscode";
 import { LMStudioClient } from '@lmstudio/sdk';
 import { encode } from 'gpt-tokenizer';
 
@@ -13,12 +13,12 @@ function getChatModelInfo(id: string, name: string, maxInputTokens: number, maxO
 		version: "1.0.0",
 		capabilities: {
 			toolCalling: supportsTools,
-			vision: false, // LM Studio models vary, but default to false for safety
+			imageInput: false,
 		}
 	};
 }
 
-export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
+export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 	private client: LMStudioClient | null = null;
 	private lastBaseUrl: string | null = null;
 	private lastApiKey: string | null = null;
@@ -29,7 +29,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
 	private output: OutputChannel;
 	private verbose = false;
 
-	readonly onDidChange = this._onDidChange.event;
+	readonly onDidChangeLanguageModelChatInformation = this._onDidChange.event;
 
 	constructor() {
 		this.output = window.createOutputChannel('LM Studio');
@@ -157,7 +157,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
 		return null;
 	}
 
-	async prepareLanguageModelChat(_options: { silent: boolean; }, _token: CancellationToken): Promise<LanguageModelChatInformation[]> {
+	async provideLanguageModelChatInformation(_options: PrepareLanguageModelChatModelOptions, _token: CancellationToken): Promise<LanguageModelChatInformation[]> {
 		// Check if we have cached models that are still valid
 		const now = Date.now();
 		if (this.cachedModels && (now - this.cacheTimestamp) < this.CACHE_DURATION) {
@@ -264,9 +264,9 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
 
 	async provideLanguageModelChatResponse(
 		model: LanguageModelChatInformation,
-		messages: Array<LanguageModelChatMessage>,
-		options: LanguageModelChatRequestHandleOptions,
-		progress: Progress<ChatResponseFragment2>,
+		messages: readonly LanguageModelChatRequestMessage[],
+		options: ProvideLanguageModelChatResponseOptions,
+		progress: Progress<LanguageModelResponsePart>,
 		token: CancellationToken
 	): Promise<void> {
 		// Ensure client is initialized with current settings
@@ -275,9 +275,8 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
 		this.log(`Chat request started with model='${model.id}' messages=${messages.length} maxTokens=${options.modelOptions?.maxTokens}`);
 
 		if (!client) {
-			progress.report({
-				index: 0,
-				part: new LanguageModelTextPart(
+			progress.report(
+				new LanguageModelTextPart(
 					"🚨 **LM Studio Server Not Started**\\n\\n" +
 					"**Quick Fix Steps:**\\n" +
 					"1. 🚀 **Open LM Studio application**\\n" +
@@ -290,28 +289,26 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
 					`• API Key: ${this.getApiKey() ? 'Configured' : 'None (OK for local)'}\\n\\n` +
 					"💡 **Tip:** The server must be running AND have a model loaded to work!"
 				)
-			});
+			);
 			return;
 		}
 
 		try {
 		// Convert VS Code messages to LM Studio chat format
 		const chatHistory = messages.map((msg, index) => {
-			let content: string;
-			if (Array.isArray(msg.content)) {
-				content = msg.content.map(part => {
+			// Extract text content from message parts
+			const content = msg.content
+				.map(part => {
 					if (part instanceof LanguageModelTextPart) {
 						return part.value;
 					} else if (part instanceof LanguageModelToolCallPart) {
 						return `[Tool Call: ${part.name}(${JSON.stringify(part.input)})]`;
 					}
 					return '';
-				}).join('');
-			} else {
-				content = msg.content;
-			}
+				})
+				.join('');
 
-			// Map VS Code roles to LM Studio roles properly
+			// Map VS Code roles to LM Studio roles
 			let role: 'user' | 'assistant' | 'system';
 			switch (msg.role) {
 				case LanguageModelChatMessageRole.User:
@@ -321,7 +318,6 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
 					role = 'assistant';
 					break;
 				default:
-					// Treat unknown roles as user to avoid errors
 					role = 'user';
 					break;
 			}
@@ -379,10 +375,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
 				if (accumulatedContent.trim().length > 0) {
 					this.log(`Flushing batch ${index}: "${accumulatedContent.substring(0, 50)}${accumulatedContent.length > 50 ? '...' : ''}"`);
 					try {
-						progress.report({
-							index: 0,
-							part: new LanguageModelTextPart(accumulatedContent)
-						});
+						progress.report(new LanguageModelTextPart(accumulatedContent));
 						receivedChars += accumulatedContent.length;
 						accumulatedContent = '';
 						index++;
@@ -501,39 +494,32 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider2 {
 				}
 			}
 
-			progress.report({
-				index: 0,
-				part: new LanguageModelTextPart(errorMessage)
-			});
+			progress.report(new LanguageModelTextPart(errorMessage));
 		}
 	}
 
-	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage, _token: CancellationToken): Promise<number> {
+	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatRequestMessage, _token: CancellationToken): Promise<number> {
 		try {
 			let content: string;
 			if (typeof text === 'string') {
 				content = text;
 			} else {
-				content = Array.isArray(text.content)
-					? text.content.map(part => part instanceof LanguageModelTextPart ? part.value : '').join('')
-					: text.content;
+				content = text.content
+					.map(part => part instanceof LanguageModelTextPart ? part.value : '')
+					.join('');
 			}
 
-			// Use gpt-tokenizer for approximation since we don't know the exact tokenizer
-			// Note: This gives an approximation since LM Studio models may use different tokenizers
 			const tokens = encode(content);
 			return tokens.length;
 		} catch {
-			// Fallback to simple estimation if tokenizer fails
 			let content: string;
 			if (typeof text === 'string') {
 				content = text;
 			} else {
-				content = Array.isArray(text.content)
-					? text.content.map(part => part instanceof LanguageModelTextPart ? part.value : '').join('')
-					: text.content;
+				content = text.content
+					.map(part => part instanceof LanguageModelTextPart ? part.value : '')
+					.join('');
 			}
-			// Rough estimation: 1 token per 4 characters
 			return Math.ceil(content.length / 4);
 		}
 	}
