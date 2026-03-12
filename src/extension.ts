@@ -4,24 +4,19 @@ import { LMStudioChatModelProvider } from './provider';
 export function activate(context: vscode.ExtensionContext) {
 	const provider = new LMStudioChatModelProvider();
 
-	// Register the chat model provider
-	const disposable = vscode.lm.registerLanguageModelChatProvider('lmstudio', provider);
-	context.subscriptions.push(disposable);
-
-	// Command to refresh models
+	// Register commands FIRST so they are always available even if
+	// the language model provider registration fails.
 	const refreshCommand = vscode.commands.registerCommand('lmstudio.refreshModels', () => {
 		provider.refreshModels();
 		vscode.window.showInformationMessage('LM Studio models refreshed');
 	});
 	context.subscriptions.push(refreshCommand);
 
-	// Command to test connection
 	const testConnectionCommand = vscode.commands.registerCommand('lmstudio.testConnection', async () => {
 		try {
-			// Test the connection
 			const models = await provider.provideLanguageModelChatInformation({ silent: false }, new vscode.CancellationTokenSource().token);
 
-			if (models.some(m => m.id === 'connection-error' || m.id === 'no-models-loaded')) {
+			if (models.some(m => m.id === 'connection-error' || m.id === 'no-models-loaded' || m.id === 'server-not-started')) {
 				vscode.window.showErrorMessage(`LM Studio connection failed. Found: ${models.map(m => m.name).join(', ')}`);
 			} else {
 				vscode.window.showInformationMessage(`LM Studio connected successfully! Found ${models.length} models: ${models.map(m => m.name).join(', ')}`);
@@ -32,11 +27,22 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 	context.subscriptions.push(testConnectionCommand);
 
-	// Command to show welcome page
 	const showWelcomeCommand = vscode.commands.registerCommand('lmstudio.showWelcome', () => {
 		showWelcomePage();
 	});
 	context.subscriptions.push(showWelcomeCommand);
+
+	// Register the chat model provider (after commands, so a failure here
+	// does not prevent commands from working).
+	try {
+		const disposable = vscode.lm.registerLanguageModelChatProvider('lmstudio', provider);
+		context.subscriptions.push(disposable);
+	} catch (error) {
+		vscode.window.showErrorMessage(
+			`LM Studio: Failed to register language model provider. ` +
+			`Make sure you are running VS Code 1.110+ and have GitHub Copilot installed. Error: ${error}`
+		);
+	}
 
 	// Show welcome page on first activation (with a small delay to ensure UI is ready)
 	setTimeout(() => {

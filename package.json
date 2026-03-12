@@ -16,7 +16,10 @@
 		"Chat"
 	],
 	"activationEvents": [
-		"onStartupFinished"
+		"onStartupFinished",
+		"onCommand:lmstudio.refreshModels",
+		"onCommand:lmstudio.testConnection",
+		"onCommand:lmstudio.showWelcome"
 	],
 	"contributes": {
 		"languageModelChatProviders": [
