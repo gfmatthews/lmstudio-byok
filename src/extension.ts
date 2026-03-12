@@ -5,7 +5,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const provider = new LMStudioChatModelProvider();
 
 	// Register the chat model provider
-	const disposable = vscode.lm.registerChatModelProvider('lmstudio', provider);
+	const disposable = vscode.lm.registerLanguageModelChatProvider('lmstudio', provider);
 	context.subscriptions.push(disposable);
 
 	// Command to refresh models
@@ -19,7 +19,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const testConnectionCommand = vscode.commands.registerCommand('lmstudio.testConnection', async () => {
 		try {
 			// Test the connection
-			const models = await provider.prepareLanguageModelChat({ silent: false }, new vscode.CancellationTokenSource().token);
+			const models = await provider.provideLanguageModelChatInformation({ silent: false }, new vscode.CancellationTokenSource().token);
 
 			if (models.some(m => m.id === 'connection-error' || m.id === 'no-models-loaded')) {
 				vscode.window.showErrorMessage(`LM Studio connection failed. Found: ${models.map(m => m.name).join(', ')}`);
