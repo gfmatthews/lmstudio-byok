@@ -287,14 +287,30 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 
 			// Pass tools to model if provided
 			if (options.tools && options.tools.length > 0) {
-				requestBody.tools = options.tools.map(t => ({
-					type: 'function',
-					function: {
-						name: t.name,
-						description: t.description,
-						parameters: t.inputSchema ?? {},
-					},
-				}));
+				requestBody.tools = options.tools.map(t => {
+					// Ensure parameters is a valid JSON Schema object with "type": "object"
+					let parameters: Record<string, unknown> = { type: 'object', properties: {} };
+					if (t.inputSchema && typeof t.inputSchema === 'object') {
+						const schema = t.inputSchema as Record<string, unknown>;
+						if (schema.type === 'object') {
+							parameters = schema;
+						} else {
+							// Wrap non-object schemas to satisfy LM Studio's requirement
+							parameters = { ...schema, type: 'object' };
+							if (!parameters.properties) {
+								parameters.properties = {};
+							}
+						}
+					}
+					return {
+						type: 'function' as const,
+						function: {
+							name: t.name,
+							description: t.description,
+							parameters,
+						},
+					};
+				});
 				if (options.toolMode === LanguageModelChatToolMode.Required) {
 					requestBody.tool_choice = 'required';
 				} else {
