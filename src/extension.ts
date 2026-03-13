@@ -194,6 +194,9 @@ function getWelcomeContent(): string {
                 <li><strong>For better performance:</strong> Meta-Llama-3.1-8B-Instruct (4.92 GB)</li>
                 <li><strong>Lightweight option:</strong> Ministral-8B-Instruct (4.67 GB)</li>
             </ul>
+            <div class="success">
+                💡 <strong>Tip:</strong> Not sure which model will run well on your hardware? Check <a href="https://www.canirun.ai">canirun.ai</a> to find the best model for your system.
+            </div>
         </div>
 
         <div class="step">
