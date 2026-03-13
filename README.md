@@ -27,6 +27,8 @@ Download and install LM Studio from [lmstudio.ai](https://lmstudio.ai/)
 2. Browse and download a model (e.g., Llama 3.2, Qwen 2.5, etc.)
 3. Load the model into memory
 
+> 💡 **Tip:** Not sure which model will run well on your hardware? Check [canirun.ai](https://www.canirun.ai) to find the best model for your system.
+
 ### 3. Start the LM Studio Server
 1. In LM Studio, go to the "Local Server" tab
 2. Click "Start Server" (default: http://localhost:1234)
@@ -89,6 +91,8 @@ The extension provides access to common model types including:
 - Phi-3.5 (Mini Instruct)
 - DeepSeek R1 Distill Llama 8B
 - Any loaded model in LM Studio
+
+> 💡 **Tip:** To find the best model for your hardware, visit [canirun.ai](https://www.canirun.ai).
 
 ## Development
 
