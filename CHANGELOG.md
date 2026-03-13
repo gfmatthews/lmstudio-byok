@@ -2,6 +2,12 @@
 
 All notable changes to the LM Studio BYOK Chat Provider extension will be documented in this file.
 
+## [0.2.0] - 2026-03-13
+
+### Added
+
+- Now correctly supports running inside a devcontainer. Yay.
+
 ## [0.1.0] - 2026-03-13
 
 ### Added
