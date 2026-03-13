@@ -1,4 +1,4 @@
-import { CancellationToken, LanguageModelChatMessageRole, LanguageModelTextPart, LanguageModelToolCallPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel } from "vscode";
+import { CancellationToken, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel } from "vscode";
 import { LanguageModelChatInformation, LanguageModelChatProvider, LanguageModelChatRequestMessage, LanguageModelResponsePart, ProvideLanguageModelChatResponseOptions, PrepareLanguageModelChatModelOptions } from "vscode";
 import { encode } from 'gpt-tokenizer';
 
@@ -14,8 +14,15 @@ interface LMStudioModelsResponse {
 }
 
 /** A single SSE delta from /v1/chat/completions (streaming). */
+interface ChatCompletionToolCallDelta {
+	index: number;
+	id?: string;
+	type?: string;
+	function?: { name?: string; arguments?: string };
+}
+
 interface ChatCompletionChunkChoice {
-	delta: { role?: string; content?: string };
+	delta: { role?: string; content?: string | null; tool_calls?: ChatCompletionToolCallDelta[] };
 	finish_reason: string | null;
 }
 
@@ -156,12 +163,9 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 			}
 
 			this.log('No models are currently loaded in LM Studio');
-			const fallbackModels = [
+			return [
 				getChatModelInfo("no-models-loaded", "📱 Load a Model in LM Studio", 32768, 8192, false),
 			];
-			this.cachedModels = fallbackModels;
-			this.cacheTimestamp = now;
-			return fallbackModels;
 
 		} catch (error) {
 			this.logError('Could not connect to LM Studio server', error);
@@ -180,12 +184,9 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 				}
 			}
 
-			const fallbackModels = [
+			return [
 				getChatModelInfo("connection-error", errorModelName, 32768, 8192, false),
 			];
-			this.cachedModels = fallbackModels;
-			this.cacheTimestamp = now;
-			return fallbackModels;
 		}
 	}
 
@@ -225,41 +226,84 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 
 		try {
 			// Convert VS Code messages to OpenAI chat format
-			const chatMessages = messages.map((msg, index) => {
-				const content = msg.content
-					.map(part => {
-						if (part instanceof LanguageModelTextPart) {
-							return part.value;
-						} else if (part instanceof LanguageModelToolCallPart) {
-							return `[Tool Call: ${part.name}(${JSON.stringify(part.input)})]`;
-						}
-						return '';
-					})
-					.join('');
+			const chatMessages: Array<Record<string, unknown>> = [];
+			messages.forEach((msg, index) => {
+				const role = msg.role === LanguageModelChatMessageRole.Assistant ? 'assistant' : 'user';
 
-				let role: 'user' | 'assistant' | 'system';
-				switch (msg.role) {
-					case LanguageModelChatMessageRole.User:
-						role = 'user';
-						break;
-					case LanguageModelChatMessageRole.Assistant:
-						role = 'assistant';
-						break;
-					default:
-						role = 'user';
-						break;
+				// Collect text parts, tool call parts (assistant), and tool result parts (user) separately
+				const textParts: string[] = [];
+				const toolCalls: Array<{ id: string; type: string; function: { name: string; arguments: string } }> = [];
+				const toolResults: Array<{ callId: string; content: string }> = [];
+
+				for (const part of msg.content) {
+					if (part instanceof LanguageModelTextPart) {
+						textParts.push(part.value);
+					} else if (part instanceof LanguageModelToolCallPart) {
+						toolCalls.push({
+							id: part.callId,
+							type: 'function',
+							function: { name: part.name, arguments: JSON.stringify(part.input) },
+						});
+					} else if (part instanceof LanguageModelToolResultPart) {
+						const resultText = part.content
+							.map(c => c instanceof LanguageModelTextPart ? c.value : JSON.stringify(c))
+							.join('');
+						toolResults.push({ callId: part.callId, content: resultText });
+					}
 				}
 
-				this.log(`Message ${index}: role=${msg.role}->${role} content=${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`);
-				return { role, content };
+				// Emit assistant message with tool_calls if present
+				if (role === 'assistant' && toolCalls.length > 0) {
+					const text = textParts.join('') || null;
+					this.log(`Message ${index}: role=assistant (tool_calls=${toolCalls.length}) content=${text ? text.substring(0, 80) : 'null'}`);
+					chatMessages.push({ role: 'assistant', content: text, tool_calls: toolCalls });
+				}
+				// Emit tool result messages
+				else if (toolResults.length > 0) {
+					// If the message also has text, emit a user message for the text first
+					const text = textParts.join('');
+					if (text) {
+						chatMessages.push({ role: 'user', content: text });
+					}
+					for (const tr of toolResults) {
+						this.log(`Message ${index}: role=tool tool_call_id=${tr.callId} content=${tr.content.substring(0, 80)}`);
+						chatMessages.push({ role: 'tool', tool_call_id: tr.callId, content: tr.content });
+					}
+				}
+				// Normal text message
+				else {
+					const text = textParts.join('');
+					this.log(`Message ${index}: role=${msg.role}->${role} content=${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
+					chatMessages.push({ role, content: text });
+				}
 			});
 
-			const body = JSON.stringify({
+			const requestBody: Record<string, unknown> = {
 				model: model.id,
 				messages: chatMessages,
 				stream: true,
 				max_tokens: options.modelOptions?.maxTokens || 8192,
-			});
+			};
+
+			// Pass tools to model if provided
+			if (options.tools && options.tools.length > 0) {
+				requestBody.tools = options.tools.map(t => ({
+					type: 'function',
+					function: {
+						name: t.name,
+						description: t.description,
+						parameters: t.inputSchema ?? {},
+					},
+				}));
+				if (options.toolMode === LanguageModelChatToolMode.Required) {
+					requestBody.tool_choice = 'required';
+				} else {
+					requestBody.tool_choice = 'auto';
+				}
+				this.log(`Including ${options.tools.length} tools, tool_choice=${requestBody.tool_choice}`);
+			}
+
+			const body = JSON.stringify(requestBody);
 
 			this.log(`POST ${baseUrl}/v1/chat/completions  model=${model.id}`);
 
@@ -299,8 +343,11 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 				const BATCH_DELAY_MS = 100;
 				let fragmentCount = 0;
 
+				// Accumulate streamed tool call fragments by index
+				const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>();
+
 				const flushContent = () => {
-					if (accumulatedContent.trim().length > 0) {
+					if (accumulatedContent.length > 0) {
 						this.log(`Flushing batch ${index}: "${accumulatedContent.substring(0, 50)}${accumulatedContent.length > 50 ? '...' : ''}"`);
 						try {
 							progress.report(new LanguageModelTextPart(accumulatedContent));
@@ -337,7 +384,44 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 							continue;
 						}
 
-						const content = chunk.choices?.[0]?.delta?.content;
+						const choice = chunk.choices?.[0];
+						if (!choice) { continue; }
+
+						// Accumulate tool call deltas
+						if (choice.delta?.tool_calls) {
+							for (const tc of choice.delta.tool_calls) {
+								const existing = pendingToolCalls.get(tc.index);
+								if (existing) {
+									if (tc.function?.arguments) {
+										existing.arguments += tc.function.arguments;
+									}
+								} else {
+									pendingToolCalls.set(tc.index, {
+										id: tc.id || `call_${tc.index}`,
+										name: tc.function?.name || '',
+										arguments: tc.function?.arguments || '',
+									});
+								}
+							}
+						}
+
+						// Emit tool calls when finish_reason indicates tool_calls
+						if (choice.finish_reason === 'tool_calls' && pendingToolCalls.size > 0) {
+							flushContent();
+							for (const [, tc] of pendingToolCalls) {
+								let input: object;
+								try {
+									input = JSON.parse(tc.arguments) as object;
+								} catch {
+									input = {};
+								}
+								this.log(`Emitting tool call: id=${tc.id} name=${tc.name} args=${tc.arguments.substring(0, 80)}`);
+								progress.report(new LanguageModelToolCallPart(tc.id, tc.name, input));
+							}
+							pendingToolCalls.clear();
+						}
+
+						const content = choice.delta?.content;
 						if (!content) { continue; }
 
 						if (firstFragmentTime === undefined) {
@@ -385,6 +469,60 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 							}
 						}
 					}
+				}
+
+				// Flush the TextDecoder and process any remaining data in the buffer
+				buffer += decoder.decode();
+				if (buffer.trim()) {
+					const remaining = buffer.trim();
+					if (remaining.startsWith('data: ') && remaining.slice(6) !== '[DONE]') {
+						try {
+							const chunk: ChatCompletionChunk = JSON.parse(remaining.slice(6));
+							const content = chunk.choices?.[0]?.delta?.content;
+							if (content && !skipThinkMode) {
+								accumulatedContent += content;
+							}
+							// Handle any final tool call deltas in the remaining buffer
+							const choice = chunk.choices?.[0];
+							if (choice?.delta?.tool_calls) {
+								for (const tc of choice.delta.tool_calls) {
+									const existing = pendingToolCalls.get(tc.index);
+									if (existing) {
+										if (tc.function?.arguments) { existing.arguments += tc.function.arguments; }
+									} else {
+										pendingToolCalls.set(tc.index, {
+											id: tc.id || `call_${tc.index}`,
+											name: tc.function?.name || '',
+											arguments: tc.function?.arguments || '',
+										});
+									}
+								}
+							}
+							if (choice.finish_reason === 'tool_calls') {
+								for (const [, tc] of pendingToolCalls) {
+									let input: object;
+									try { input = JSON.parse(tc.arguments) as object; } catch { input = {}; }
+									this.log(`Emitting tool call (remaining buffer): id=${tc.id} name=${tc.name}`);
+									progress.report(new LanguageModelToolCallPart(tc.id, tc.name, input));
+								}
+								pendingToolCalls.clear();
+							}
+						} catch {
+							this.log(`Skipping unparseable remaining buffer: ${remaining.substring(0, 80)}`);
+						}
+					}
+				}
+
+				// Emit any pending tool calls that weren't flushed (e.g. if finish_reason was missed)
+				if (pendingToolCalls.size > 0) {
+					flushContent();
+					for (const [, tc] of pendingToolCalls) {
+						let input: object;
+						try { input = JSON.parse(tc.arguments) as object; } catch { input = {}; }
+						this.log(`Emitting tool call (stream end): id=${tc.id} name=${tc.name}`);
+						progress.report(new LanguageModelToolCallPart(tc.id, tc.name, input));
+					}
+					pendingToolCalls.clear();
 				}
 
 				flushContent();
