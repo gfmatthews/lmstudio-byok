@@ -362,12 +362,74 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 				// Accumulate streamed tool call fragments by index
 				const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
+				// Regex to detect tool calls emitted as plain text by models that don't
+				// use the structured tool_calls delta (e.g. "functionName[ARGS]{...json...}")
+				const TEXT_TOOL_CALL_RE = /([a-zA-Z_][\w]*)\[ARGS\](\{[\s\S]*\})\s*$/;
+				let textToolCallBuffer = '';
+				let textToolCallCallId = 0;
+
 				const flushContent = () => {
 					if (accumulatedContent.length > 0) {
-						this.log(`Flushing batch ${index}: "${accumulatedContent.substring(0, 50)}${accumulatedContent.length > 50 ? '...' : ''}"`);
+						// Check if accumulated content contains a text-based tool call
+						const combined = textToolCallBuffer + accumulatedContent;
+						const match = TEXT_TOOL_CALL_RE.exec(combined);
+						if (match) {
+							// Report any text *before* the tool call pattern
+							const beforeToolCall = combined.substring(0, match.index).trimEnd();
+							if (beforeToolCall.length > 0) {
+								this.log(`Flushing text before text-tool-call: "${beforeToolCall.substring(0, 50)}"`);
+								try {
+									progress.report(new LanguageModelTextPart(beforeToolCall));
+									receivedChars += beforeToolCall.length;
+									index++;
+								} catch (error) {
+									this.logError('Error reporting fragment', error);
+								}
+							}
+							// Emit the tool call as a proper LanguageModelToolCallPart
+							const toolName = match[1];
+							const toolArgsRaw = match[2];
+							let toolInput: object;
+							try {
+								toolInput = JSON.parse(toolArgsRaw) as object;
+							} catch {
+								toolInput = {};
+							}
+							const callId = `text_call_${textToolCallCallId++}`;
+							this.log(`Detected text-based tool call: name=${toolName} callId=${callId} args=${toolArgsRaw.substring(0, 80)}`);
+							progress.report(new LanguageModelToolCallPart(callId, toolName, toolInput));
+							accumulatedContent = '';
+							textToolCallBuffer = '';
+							return;
+						}
+
+						// Check if content might be the start of a text tool call (partial match)
+						// e.g. we have "create_new_workspace[AR" — don't flush yet, keep buffering
+						const partialIdx = combined.search(/[a-zA-Z_][\w]*\[A[R]?[G]?[S]?$/);
+						if (partialIdx >= 0) {
+							// Flush the safe portion before the potential partial match
+							const safe = combined.substring(0, partialIdx);
+							if (safe.length > 0) {
+								this.log(`Flushing batch ${index}: "${safe.substring(0, 50)}${safe.length > 50 ? '...' : ''}"`);
+								try {
+									progress.report(new LanguageModelTextPart(safe));
+									receivedChars += safe.length;
+									index++;
+								} catch (error) {
+									this.logError('Error reporting fragment', error);
+								}
+							}
+							textToolCallBuffer = combined.substring(partialIdx);
+							accumulatedContent = '';
+							return;
+						}
+
+						const toFlush = combined;
+						textToolCallBuffer = '';
+						this.log(`Flushing batch ${index}: "${toFlush.substring(0, 50)}${toFlush.length > 50 ? '...' : ''}"`);
 						try {
-							progress.report(new LanguageModelTextPart(accumulatedContent));
-							receivedChars += accumulatedContent.length;
+							progress.report(new LanguageModelTextPart(toFlush));
+							receivedChars += toFlush.length;
 							accumulatedContent = '';
 							index++;
 						} catch (error) {
