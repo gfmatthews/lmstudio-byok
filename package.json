@@ -1,8 +1,10 @@
 {
 	"name": "lmstudio-byok-chat-provider",
-	"publisher": "pierceboggan",
+	"publisher": "NullSetIndustries",
 	"displayName": "LM Studio BYOK Chat Provider",
 	"description": "Bring your own LM Studio instance to use local LLM models in GitHub Copilot Chat.",
+	"license": "MIT",
+	"icon": "assets/LogoV1.png",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/gfmatthews/lmstudio-byok"
