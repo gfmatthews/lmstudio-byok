@@ -68,5 +68,7 @@ jobs:
             --generate-notes
 
       - name: Publish to Marketplace
-        if: ${{ secrets.VSCE_PAT != '' }}
-        run: npx @vscode/vsce publish --no-dependencies -p "${{ secrets.VSCE_PAT }}"
+        if: env.VSCE_PAT != ''
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx @vscode/vsce publish --no-dependencies -p "$VSCE_PAT"
