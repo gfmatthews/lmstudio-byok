@@ -1,4 +1,4 @@
-import { CancellationToken, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel } from "vscode";
+import { CancellationToken, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel, env } from "vscode";
 import { LanguageModelChatInformation, LanguageModelChatProvider, LanguageModelChatRequestMessage, LanguageModelResponsePart, ProvideLanguageModelChatResponseOptions, PrepareLanguageModelChatModelOptions } from "vscode";
 import { encode } from 'gpt-tokenizer';
 
@@ -93,15 +93,39 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		console.error(`LM Studio: ${msg}`, err);
 	}
 
+	/**
+	 * When running inside a dev container or remote environment, rewrite
+	 * localhost / 127.0.0.1 to host.docker.internal so the extension can
+	 * reach the LM Studio server on the host machine.
+	 */
+	private resolveHostUrl(url: string): string {
+		const remoteName = env.remoteName;
+		if (!remoteName || remoteName === 'wsl') {
+			return url;
+		}
+		const rewritten = url.replace(
+			/\/\/(localhost|127\.0\.0\.1)\b/,
+			'//host.docker.internal',
+		);
+		if (rewritten !== url) {
+			this.log(
+				`Remote environment detected (${remoteName}). ` +
+				`Rewrote base URL to ${rewritten} so it can reach the host machine. ` +
+				`Override this by setting lmstudio.baseUrl to a non-localhost address.`,
+			);
+		}
+		return rewritten;
+	}
+
 	private getBaseUrl(): string {
 		const config = workspace.getConfiguration('lmstudio');
 		const configUrl = config.get<string>('baseUrl');
 		if (configUrl) {
 			this.log('Using base URL from VS Code settings');
-			return configUrl.replace(/\/+$/, ''); // strip trailing slashes
+			return this.resolveHostUrl(configUrl.replace(/\/+$/, '')); // strip trailing slashes
 		}
 		this.log('Using default base URL');
-		return 'http://localhost:1234';
+		return this.resolveHostUrl('http://localhost:1234');
 	}
 
 	private getApiKey(): string | null {

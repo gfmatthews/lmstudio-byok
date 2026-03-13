@@ -256,6 +256,19 @@ function getWelcomeContent(): string {
             </ul>
         </div>
 
+        <div class="step">
+            <div class="step-number">Dev Containers &amp; Remote Environments</div>
+            <p>When running inside a <strong>dev container</strong>, SSH remote, or similar environment,
+               the extension automatically rewrites <code>localhost</code> to
+               <code>host.docker.internal</code> so it can reach the LM Studio server on your
+               host machine.</p>
+            <ul>
+                <li>This happens transparently — no configuration needed.</li>
+                <li>To override, set <code>lmstudio.baseUrl</code> to the address you want.</li>
+                <li>Enable verbose logging to see the resolved URL in the output channel.</li>
+            </ul>
+        </div>
+
         <h2>🎯 Need Help?</h2>
         <p>
             <strong>Commands available:</strong><br>
