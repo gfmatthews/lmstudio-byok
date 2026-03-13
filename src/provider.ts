@@ -1,7 +1,27 @@
 import { CancellationToken, LanguageModelChatMessageRole, LanguageModelTextPart, LanguageModelToolCallPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel } from "vscode";
 import { LanguageModelChatInformation, LanguageModelChatProvider, LanguageModelChatRequestMessage, LanguageModelResponsePart, ProvideLanguageModelChatResponseOptions, PrepareLanguageModelChatModelOptions } from "vscode";
-import { LMStudioClient } from '@lmstudio/sdk';
 import { encode } from 'gpt-tokenizer';
+
+/** Shape returned by the LM Studio /v1/models endpoint. */
+interface LMStudioModel {
+	id: string;
+	object: string;
+	owned_by?: string;
+}
+
+interface LMStudioModelsResponse {
+	data: LMStudioModel[];
+}
+
+/** A single SSE delta from /v1/chat/completions (streaming). */
+interface ChatCompletionChunkChoice {
+	delta: { role?: string; content?: string };
+	finish_reason: string | null;
+}
+
+interface ChatCompletionChunk {
+	choices: ChatCompletionChunkChoice[];
+}
 
 function getChatModelInfo(id: string, name: string, maxInputTokens: number, maxOutputTokens: number, supportsTools = true): LanguageModelChatInformation {
 	return {
@@ -19,9 +39,6 @@ function getChatModelInfo(id: string, name: string, maxInputTokens: number, maxO
 }
 
 export class LMStudioChatModelProvider implements LanguageModelChatProvider {
-	private client: LMStudioClient | null = null;
-	private lastBaseUrl: string | null = null;
-	private lastApiKey: string | null = null;
 	private _onDidChange = new EventEmitter<void>();
 	private cachedModels: LanguageModelChatInformation[] | null = null;
 	private cacheTimestamp = 0;
@@ -34,16 +51,10 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 	constructor() {
 		this.output = window.createOutputChannel('LM Studio');
 		this.loadVerbosity();
-		// Listen for configuration changes to refresh the client
 		workspace.onDidChangeConfiguration((e: ConfigurationChangeEvent) => {
 			if (e.affectsConfiguration('lmstudio.baseUrl') || e.affectsConfiguration('lmstudio.apiKey') || e.affectsConfiguration('lmstudio.verboseLogging')) {
-				this.log('Configuration changed, will refresh client on next request');
+				this.log('Configuration changed, clearing cache');
 				this.loadVerbosity();
-				// Reset the client so it gets recreated with new settings
-				this.client = null;
-				this.lastBaseUrl = null;
-				this.lastApiKey = null;
-				// Clear cache and notify of changes
 				this.cachedModels = null;
 				this.cacheTimestamp = 0;
 				this._onDidChange.fire();
@@ -75,164 +86,97 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		console.error(`LM Studio: ${msg}`, err);
 	}
 
-	private ensureClient(): LMStudioClient | null {
-		const baseUrl = this.getBaseUrl();
-		const apiKey = this.getApiKey();
-
-		// If we have a client and the settings haven't changed, reuse it
-		if (this.client && this.lastBaseUrl === baseUrl && this.lastApiKey === apiKey) {
-			return this.client;
-		}
-
-		// Create new client with current settings
-		try {
-			// The SDK requires a ws:// or wss:// URL. Always provide an explicit
-			// baseUrl to prevent the SDK's auto-discovery port scanning, which
-			// fires unhandled promise rejections that crash the extension host.
-			const wsUrl = this.toWebSocketUrl(baseUrl);
-			this.log(`Creating client with baseUrl: ${wsUrl}`);
-
-			this.client = new LMStudioClient({ baseUrl: wsUrl });
-			this.lastBaseUrl = baseUrl;
-			this.lastApiKey = apiKey;
-
-			this.log('Client created successfully');
-			return this.client;
-		} catch (error) {
-			this.logError('Failed to create client', error);
-			this.client = null;
-			this.lastBaseUrl = null;
-			this.lastApiKey = null;
-			return null;
-		}
-	}
-
-	private toWebSocketUrl(httpUrl: string): string {
-		try {
-			const url = new URL(httpUrl);
-			const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-			return `${wsProtocol}//${url.host}`;
-		} catch {
-			return 'ws://127.0.0.1:1234';
-		}
-	}
-
 	private getBaseUrl(): string {
-		// Check VS Code workspace configuration first
 		const config = workspace.getConfiguration('lmstudio');
 		const configUrl = config.get<string>('baseUrl');
 		if (configUrl) {
 			this.log('Using base URL from VS Code settings');
-			return configUrl;
+			return configUrl.replace(/\/+$/, ''); // strip trailing slashes
 		}
-
-		// Fall back to default
 		this.log('Using default base URL');
 		return 'http://localhost:1234';
 	}
 
 	private getApiKey(): string | null {
-		// First try environment variable
 		const envKey = process.env.LMSTUDIO_API_KEY;
 		if (envKey) {
 			this.log('Using API key from environment variable');
 			return envKey;
 		}
-
-		// Then try VS Code workspace configuration
 		const config = workspace.getConfiguration('lmstudio');
 		const configKey = config.get<string>('apiKey');
 		if (configKey) {
 			this.log('Using API key from VS Code settings');
 			return configKey;
 		}
-
 		this.log('No API key found (this is OK for local instances)');
 		return null;
 	}
 
+	/** Build common headers for LM Studio HTTP requests. */
+	private buildHeaders(): Record<string, string> {
+		const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+		const apiKey = this.getApiKey();
+		if (apiKey) {
+			headers['Authorization'] = `Bearer ${apiKey}`;
+		}
+		return headers;
+	}
+
 	async provideLanguageModelChatInformation(_options: PrepareLanguageModelChatModelOptions, _token: CancellationToken): Promise<LanguageModelChatInformation[]> {
-		// Check if we have cached models that are still valid
 		const now = Date.now();
 		if (this.cachedModels && (now - this.cacheTimestamp) < this.CACHE_DURATION) {
 			this.log('Using cached models');
 			return this.cachedModels;
 		}
 
-		// Try to get loaded models from LM Studio dynamically
+		const baseUrl = this.getBaseUrl();
+
 		try {
-			const client = this.ensureClient();
-			if (!client) {
-				this.log('Client not available, using fallback model');
-				const fallbackModels = [
-					getChatModelInfo("server-not-started", "🚨 Start LM Studio Server First!", 32768, 8192, false),
-				];
-				this.cachedModels = fallbackModels;
-				this.cacheTimestamp = now;
-				return fallbackModels;
+			this.log(`Fetching models from ${baseUrl}/v1/models ...`);
+			const resp = await fetch(`${baseUrl}/v1/models`, { headers: this.buildHeaders() });
+
+			if (!resp.ok) {
+				const body = await resp.text();
+				throw new Error(`HTTP ${resp.status}: ${body}`);
 			}
 
-			// Test connection by trying to get loaded models
-			this.log('Testing connection and fetching loaded models...');
-			const loadedModels = await client.llm.listLoaded();
-			this.log(`Successfully connected! Found ${loadedModels.length} loaded models`);
+			const json = (await resp.json()) as LMStudioModelsResponse;
+			this.log(`Successfully connected! Found ${json.data.length} models`);
 
-			// Convert LM Studio loaded models to VS Code model info
-			const models: LanguageModelChatInformation[] = [];
+			const models: LanguageModelChatInformation[] = json.data.map(m => {
+				this.log(`Adding model ${m.id}`);
+				return getChatModelInfo(m.id, m.id, 32768, 8192, true);
+			});
 
-			for (const model of loadedModels) {
-				// Use the model identifier as both ID and name
-				const id = model.identifier;
-				const name = model.identifier; // LLM object doesn't have a separate display name
-
-				// Get context length from model, use default if not available
-				let maxInputTokens = 32768;
-				try {
-					maxInputTokens = await model.getContextLength();
-				} catch (error) {
-					this.logError(`Could not get context length for ${id}, using default`, error);
-				}
-
-				const maxOutputTokens = Math.min(8192, Math.floor(maxInputTokens / 4)); // Conservative output limit
-
-				// Assume tool calling support for loaded models (can be refined later)
-				const supportsTools = true;
-
-				this.log(`Adding loaded model ${id} - Context: ${maxInputTokens}`);
-
-				models.push(getChatModelInfo(id, name, maxInputTokens, maxOutputTokens, supportsTools));
-			}
-
-			// If we found loaded models, return them, otherwise provide helpful guidance
 			if (models.length > 0) {
 				this.cachedModels = models;
 				this.cacheTimestamp = now;
 				return models;
-			} else {
-				this.log('No models are currently loaded in LM Studio');
-				const fallbackModels = [
-					getChatModelInfo("no-models-loaded", "📱 Load a Model in LM Studio", 32768, 8192, false),
-				];
-				this.cachedModels = fallbackModels;
-				this.cacheTimestamp = now;
-				return fallbackModels;
 			}
+
+			this.log('No models are currently loaded in LM Studio');
+			const fallbackModels = [
+				getChatModelInfo("no-models-loaded", "📱 Load a Model in LM Studio", 32768, 8192, false),
+			];
+			this.cachedModels = fallbackModels;
+			this.cacheTimestamp = now;
+			return fallbackModels;
 
 		} catch (error) {
 			this.logError('Could not connect to LM Studio server', error);
 
-			// Provide helpful error message based on the error type
 			let errorModelName = "Connection Error - Check LM Studio";
 			if (error instanceof Error) {
 				this.logError('Connection error details', error);
-				if (error.message.includes('ECONNREFUSED') || error.message.includes('connection')) {
+				if (error.message.includes('ECONNREFUSED') || error.message.includes('fetch failed')) {
 					errorModelName = "🔌 Start LM Studio Server (Local Server tab)";
-				} else if (error.message.includes('unauthorized') || error.message.includes('401')) {
+				} else if (error.message.includes('401') || error.message.includes('unauthorized')) {
 					errorModelName = "🔐 Authentication Error (Check API key)";
 				} else if (error.message.includes('timeout')) {
 					errorModelName = "⏱️ Connection Timeout - Check Network";
 				} else {
-					errorModelName = `❌ Connection Error: ${error.message.substring(0, 40)}...`;
+					errorModelName = `❌ ${error.message.substring(0, 50)}`;
 				}
 			}
 
@@ -245,10 +189,6 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		}
 	}
 
-	/**
-	 * Manually refresh the model cache. This can be called when users want to update
-	 * the available models without waiting for the cache to expire.
-	 */
 	public refreshModels(): void {
 		console.log('LM Studio: Manually refreshing model cache');
 		this.cachedModels = null;
@@ -263,228 +203,222 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		progress: Progress<LanguageModelResponsePart>,
 		token: CancellationToken
 	): Promise<void> {
-		// Ensure client is initialized with current settings
-		const client = this.ensureClient();
+		const baseUrl = this.getBaseUrl();
 		const started = Date.now();
 		this.log(`Chat request started with model='${model.id}' messages=${messages.length} maxTokens=${options.modelOptions?.maxTokens}`);
 
-		if (!client) {
+		if (model.id === "no-models-loaded" || model.id === "connection-error" || model.id === "server-not-started") {
 			progress.report(
 				new LanguageModelTextPart(
-					"🚨 **LM Studio Server Not Started**\\n\\n" +
-					"**Quick Fix Steps:**\\n" +
-					"1. 🚀 **Open LM Studio application**\\n" +
-					"2. 🌐 **Click the 'Local Server' tab at the top**\\n" +
-					"3. ▶️ **Click 'Start Server' button**\\n" +
-					"4. 📱 **Load a model** (click 'Select a model' if none loaded)\\n" +
-					"5. 🔄 **Try your chat request again**\\n\\n" +
-					"**Current settings:**\\n" +
-					`• Connecting to: ${this.getBaseUrl()}\\n` +
-					`• API Key: ${this.getApiKey() ? 'Configured' : 'None (OK for local)'}\\n\\n` +
-					"💡 **Tip:** The server must be running AND have a model loaded to work!"
+					"🚨 **LM Studio Server Not Started or No Model Loaded**\n\n" +
+					"**Quick Fix Steps:**\n" +
+					"1. 🚀 Open LM Studio application\n" +
+					"2. 🌐 Click the 'Local Server' tab at the top\n" +
+					"3. ▶️ Click 'Start Server' button\n" +
+					"4. 📱 Load a model (click 'Select a model' if none loaded)\n" +
+					"5. 🔄 Try your chat request again\n\n" +
+					`**Connecting to:** ${baseUrl}\n`
 				)
 			);
 			return;
 		}
 
 		try {
-		// Convert VS Code messages to LM Studio chat format
-		const chatHistory = messages.map((msg, index) => {
-			// Extract text content from message parts
-			const content = msg.content
-				.map(part => {
-					if (part instanceof LanguageModelTextPart) {
-						return part.value;
-					} else if (part instanceof LanguageModelToolCallPart) {
-						return `[Tool Call: ${part.name}(${JSON.stringify(part.input)})]`;
-					}
-					return '';
-				})
-				.join('');
+			// Convert VS Code messages to OpenAI chat format
+			const chatMessages = messages.map((msg, index) => {
+				const content = msg.content
+					.map(part => {
+						if (part instanceof LanguageModelTextPart) {
+							return part.value;
+						} else if (part instanceof LanguageModelToolCallPart) {
+							return `[Tool Call: ${part.name}(${JSON.stringify(part.input)})]`;
+						}
+						return '';
+					})
+					.join('');
 
-			// Map VS Code roles to LM Studio roles
-			let role: 'user' | 'assistant' | 'system';
-			switch (msg.role) {
-				case LanguageModelChatMessageRole.User:
-					role = 'user';
-					break;
-				case LanguageModelChatMessageRole.Assistant:
-					role = 'assistant';
-					break;
-				default:
-					role = 'user';
-					break;
-			}
+				let role: 'user' | 'assistant' | 'system';
+				switch (msg.role) {
+					case LanguageModelChatMessageRole.User:
+						role = 'user';
+						break;
+					case LanguageModelChatMessageRole.Assistant:
+						role = 'assistant';
+						break;
+					default:
+						role = 'user';
+						break;
+				}
 
-			const convertedMessage = { role, content };
-			this.log(`Message ${index}: role=${msg.role}->${role} content=${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`);
-			return convertedMessage;
-		});			// Get a model instance - try to get the requested model or use the first available one
-			let llmModel;
+				this.log(`Message ${index}: role=${msg.role}->${role} content=${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`);
+				return { role, content };
+			});
+
+			const body = JSON.stringify({
+				model: model.id,
+				messages: chatMessages,
+				stream: true,
+				max_tokens: options.modelOptions?.maxTokens || 8192,
+			});
+
+			this.log(`POST ${baseUrl}/v1/chat/completions  model=${model.id}`);
+
+			const controller = new AbortController();
+			const onCancel = token.onCancellationRequested(() => {
+				this.log('Cancellation requested, aborting fetch');
+				controller.abort();
+			});
+
 			try {
-				if (model.id === "no-models-loaded" || model.id === "connection-error" || model.id === "server-not-started") {
-					throw new Error("No models available or connection error. Please start LM Studio server and load a model.");
+				const resp = await fetch(`${baseUrl}/v1/chat/completions`, {
+					method: 'POST',
+					headers: this.buildHeaders(),
+					body,
+					signal: controller.signal,
+				});
+
+				if (!resp.ok) {
+					const errBody = await resp.text();
+					throw new Error(`HTTP ${resp.status}: ${errBody}`);
 				}
 
-				// Get list of currently loaded models
-				const loadedModels = await client.llm.listLoaded();
-
-				if (loadedModels.length === 0) {
-					throw new Error("No models are currently loaded in LM Studio. Please load a model first.");
+				if (!resp.body) {
+					throw new Error('Response body is empty');
 				}
 
-				// Try to find the specific model requested
-				llmModel = loadedModels.find(m => m.identifier === model.id);
+				// Stream SSE chunks
+				const reader = resp.body.getReader();
+				const decoder = new TextDecoder();
+				let buffer = '';
+				let index = 0;
+				let receivedChars = 0;
+				let firstFragmentTime: number | undefined;
+				let skipThinkMode = false;
+				let accumulatedContent = '';
+				let lastReportTime = Date.now();
+				const BATCH_DELAY_MS = 100;
+				let fragmentCount = 0;
 
-				if (!llmModel) {
-					// If specific model not found, use the first available one
-					llmModel = loadedModels[0];
-					this.log(`Requested model '${model.id}' not found, using: ${llmModel.identifier}`);
-				} else {
-					this.log(`Using requested model: ${llmModel.identifier}`);
-				}
-
-			} catch (loadError) {
-				throw new Error(`No models available. Please load a model in LM Studio first. Error: ${loadError}`);
-			}
-
-			// Make the prediction with streaming
-			const predictionOptions = {
-				maxTokens: options.modelOptions?.maxTokens || 8192,
-			};
-			this.log(`Invoking respond() with options ${JSON.stringify(predictionOptions)} historyLength=${chatHistory.length}`);
-			const prediction = llmModel.respond(chatHistory, predictionOptions);
-
-			let index = 0;
-			let receivedChars = 0;
-			let firstFragmentTime: number | undefined;
-			let skipThinkMode = false;
-			let accumulatedContent = '';
-			let lastReportTime = Date.now();
-			const BATCH_DELAY_MS = 100; // Slightly longer delay for stability
-			let fragmentCount = 0;
-
-			// Helper function to flush accumulated content
-			const flushContent = () => {
-				if (accumulatedContent.trim().length > 0) {
-					this.log(`Flushing batch ${index}: "${accumulatedContent.substring(0, 50)}${accumulatedContent.length > 50 ? '...' : ''}"`);
-					try {
-						progress.report(new LanguageModelTextPart(accumulatedContent));
-						receivedChars += accumulatedContent.length;
-						accumulatedContent = '';
-						index++;
-					} catch (error) {
-						this.logError('Error reporting fragment', error);
+				const flushContent = () => {
+					if (accumulatedContent.trim().length > 0) {
+						this.log(`Flushing batch ${index}: "${accumulatedContent.substring(0, 50)}${accumulatedContent.length > 50 ? '...' : ''}"`);
+						try {
+							progress.report(new LanguageModelTextPart(accumulatedContent));
+							receivedChars += accumulatedContent.length;
+							accumulatedContent = '';
+							index++;
+						} catch (error) {
+							this.logError('Error reporting fragment', error);
+						}
 					}
-				}
-			};
+				};
 
-			// Stream the response
-			for await (const fragment of prediction) {
-				if (token.isCancellationRequested) {
-					this.log('Cancellation requested by VS Code token');
-					break;
-				}
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) { break; }
 
-				if (fragment.content) {
-					if (firstFragmentTime === undefined) {
-						firstFragmentTime = Date.now();
-						this.log(`First fragment received after ${firstFragmentTime - started}ms`);
-					}
+					buffer += decoder.decode(value, { stream: true });
 
-					const content = fragment.content;
-					fragmentCount++;
+					// Process complete SSE lines
+					const lines = buffer.split('\n');
+					buffer = lines.pop() || ''; // keep incomplete line in buffer
 
-					// Handle thinking mode - skip <think> content entirely
-					if (content === '<think>' || content === '<|channel|>analysis<|message|>') {
-						skipThinkMode = true;
-						this.log(`Fragment skipped (start thinking): raw="${content}"`);
-						continue;
-					} else if (content === '</think>' || content === '<|end|>') {
-						skipThinkMode = false;
-						this.log(`Fragment skipped (end thinking): raw="${content}"`);
-						continue;
-					} else if (skipThinkMode) {
-						// Skip all content while in thinking mode
-						this.log(`Fragment skipped (thinking mode): raw="${content}"`);
-						continue;
-					}
+					for (const line of lines) {
+						const trimmed = line.trim();
+						if (!trimmed || !trimmed.startsWith('data: ')) { continue; }
+						const data = trimmed.slice(6);
+						if (data === '[DONE]') { continue; }
 
-					// Skip empty structured tokens
-					if (content === '<|channel|>final<|message|>' ||
-						content === '<|start|>assistant' ||
-						content === '<|end|>') {
-						this.log(`Fragment skipped (empty token): raw="${content}"`);
-						continue;
-					}
+						let chunk: ChatCompletionChunk;
+						try {
+							chunk = JSON.parse(data);
+						} catch {
+							this.log(`Skipping unparseable SSE chunk: ${data.substring(0, 80)}`);
+							continue;
+						}
 
-					// Only accumulate non-empty content
-					if (content.length > 0) {
-						accumulatedContent += content;
-						
-						const now = Date.now();
-						
-						// More conservative flushing strategy
-						const shouldFlush = 
-							// Flush on paragraph breaks (double newlines)
-							content.includes('\n\n') ||
-							// Flush on code block boundaries  
-							content.includes('```') ||
-							// Flush if we've accumulated a reasonable amount
-							accumulatedContent.length >= 50 ||
-							// Flush if enough time has passed
-							(now - lastReportTime) >= BATCH_DELAY_MS ||
-							// Flush every 10 fragments to prevent too much accumulation
-							(fragmentCount % 10 === 0);
+						const content = chunk.choices?.[0]?.delta?.content;
+						if (!content) { continue; }
 
-						if (shouldFlush) {
-							flushContent();
-							lastReportTime = now;
+						if (firstFragmentTime === undefined) {
+							firstFragmentTime = Date.now();
+							this.log(`First fragment received after ${firstFragmentTime - started}ms`);
+						}
+
+						fragmentCount++;
+
+						// Handle thinking mode - skip <think> content entirely
+						if (content === '<think>' || content === '<|channel|>analysis<|message|>') {
+							skipThinkMode = true;
+							this.log(`Fragment skipped (start thinking): raw="${content}"`);
+							continue;
+						} else if (content === '</think>' || content === '<|end|>') {
+							skipThinkMode = false;
+							this.log(`Fragment skipped (end thinking): raw="${content}"`);
+							continue;
+						} else if (skipThinkMode) {
+							this.log(`Fragment skipped (thinking mode): raw="${content}"`);
+							continue;
+						}
+
+						if (content === '<|channel|>final<|message|>' ||
+							content === '<|start|>assistant' ||
+							content === '<|end|>') {
+							this.log(`Fragment skipped (empty token): raw="${content}"`);
+							continue;
+						}
+
+						if (content.length > 0) {
+							accumulatedContent += content;
+
+							const now = Date.now();
+							const shouldFlush =
+								content.includes('\n\n') ||
+								content.includes('```') ||
+								accumulatedContent.length >= 50 ||
+								(now - lastReportTime) >= BATCH_DELAY_MS ||
+								(fragmentCount % 10 === 0);
+
+							if (shouldFlush) {
+								flushContent();
+								lastReportTime = now;
+							}
 						}
 					}
 				}
+
+				flushContent();
+				const ended = Date.now();
+				this.log(`Streaming complete fragments=${index} chars=${receivedChars} duration=${ended - started}ms firstFragmentLatency=${firstFragmentTime ? firstFragmentTime - started : 'n/a'}ms`);
+			} finally {
+				onCancel.dispose();
 			}
 
-			// Always flush any remaining content at the end
-			flushContent();
-			const ended = Date.now();
-			this.log(`Streaming complete fragments=${index} chars=${receivedChars} duration=${ended-started}ms firstFragmentLatency=${firstFragmentTime?firstFragmentTime-started:'n/a'}ms`);
-
 		} catch (error) {
-			let errorMessage = 'Unknown error occurred';
+			if ((error as Error).name === 'AbortError') {
+				this.log('Request aborted by user');
+				return;
+			}
 
+			let errorMessage = 'Unknown error occurred';
 			if (error instanceof Error) {
 				errorMessage = error.message;
 
-				// Provide more helpful error messages for common issues
-				if (errorMessage.includes('ECONNREFUSED') || errorMessage.includes('connection')) {
-					errorMessage = "🔌 **Cannot connect to LM Studio**\\n\\n" +
-						"**Troubleshooting steps:**\\n" +
-						"1. 🚀 Start LM Studio application\\n" +
-						"2. 🌐 Go to 'Local Server' tab\\n" +
-						"3. ▶️ Click 'Start Server'\\n" +
-						"4. 📱 Load a model (click 'Select a model')\\n" +
-						"5. ✅ Wait for model to load completely\\n" +
-						"6. 🔄 Try your request again\\n\\n" +
-						`**Current settings:**\\n` +
-						`• Trying to connect to: ${this.getBaseUrl()}\\n` +
-						`• API Key: ${this.getApiKey() ? 'Set' : 'Not required for local'}\\n\\n` +
-						"**Quick fix:** Check LM Studio's 'Local Server' tab and ensure it shows 'Server running'.";
-				} else if (errorMessage.includes('unauthorized') || errorMessage.includes('401')) {
-					errorMessage = "🔐 **Authentication failed**\\n\\nPlease check your LM Studio API key in VS Code settings.";
+				if (errorMessage.includes('ECONNREFUSED') || errorMessage.includes('fetch failed')) {
+					errorMessage = "🔌 **Cannot connect to LM Studio**\n\n" +
+						"**Troubleshooting steps:**\n" +
+						"1. 🚀 Start LM Studio application\n" +
+						"2. 🌐 Go to 'Local Server' tab\n" +
+						"3. ▶️ Click 'Start Server'\n" +
+						"4. 📱 Load a model (click 'Select a model')\n" +
+						"5. 🔄 Try your request again\n\n" +
+						`**Connecting to:** ${baseUrl}\n`;
+				} else if (errorMessage.includes('401') || errorMessage.includes('unauthorized')) {
+					errorMessage = "🔐 **Authentication failed**\n\nPlease check your LM Studio API key in VS Code settings.";
 				} else if (errorMessage.includes('No models available') || errorMessage.includes('No models are currently loaded')) {
-					errorMessage = "📱 **No models loaded in LM Studio**\\n\\n" +
-						"**Step-by-step fix:**\\n" +
-						"1. 🚀 **Open LM Studio app**\\n" +
-						"2. 🌐 **Go to 'Local Server' tab**\\n" +
-						"3. ▶️ **Start the server** (if not already running)\\n" +
-						"4. 📋 **Click 'Select a model to load'**\\n" +
-						"5. ⚡ **Choose and load a model**\\n" +
-						"6. ✅ **Wait for model to finish loading**\\n" +
-						"7. 🔄 **Try your chat request again**\\n\\n" +
-						"💡 **Quick check:** Look for a green indicator next to your model in LM Studio!";
-				} else if (errorMessage.includes('rate limit') || errorMessage.includes('429')) {
-					errorMessage = "⏱️ **Rate limit exceeded**\\n\\nPlease wait a moment and try again.";
+					errorMessage = "📱 **No models loaded in LM Studio**\n\nLoad a model in the Local Server tab and try again.";
+				} else if (errorMessage.includes('429') || errorMessage.includes('rate limit')) {
+					errorMessage = "⏱️ **Rate limit exceeded**\n\nPlease wait a moment and try again.";
 				}
 			}
 
@@ -492,7 +426,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		}
 	}
 
-	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatRequestMessage, _token: CancellationToken): Promise<number> {
+	async provideTokenCount(_model: LanguageModelChatInformation, text: string | LanguageModelChatRequestMessage, _token: CancellationToken): Promise<number> {
 		try {
 			let content: string;
 			if (typeof text === 'string') {
