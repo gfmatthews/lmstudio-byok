@@ -11,6 +11,10 @@ on:
           - patch
           - minor
           - major
+      changelog:
+        description: "Changelog entries (one bullet point per line)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -46,11 +50,37 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Update CHANGELOG.md
+        env:
+          CHANGELOG_INPUT: ${{ inputs.changelog }}
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          DATE=$(date +%Y-%m-%d)
+          # Build the new changelog section
+          {
+            echo "## [$VERSION] - $DATE"
+            echo ""
+            echo "$CHANGELOG_INPUT" | while IFS= read -r line; do
+              line=$(echo "$line" | sed 's/^[[:space:]]*//')
+              [ -z "$line" ] && continue
+              # Strip leading "- " or "* " if present, then re-add "- "
+              line=$(echo "$line" | sed 's/^[-*][[:space:]]*//')
+              echo "- $line"
+            done
+            echo ""
+          } > /tmp/new_section.md
+          # Insert after line 3 (after header + description + blank line)
+          head -n 3 CHANGELOG.md > /tmp/changelog_new.md
+          echo "" >> /tmp/changelog_new.md
+          cat /tmp/new_section.md >> /tmp/changelog_new.md
+          tail -n +4 CHANGELOG.md >> /tmp/changelog_new.md
+          mv /tmp/changelog_new.md CHANGELOG.md
+
       - name: Commit and tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json
+          git add package.json package-lock.json CHANGELOG.md
           git commit -m "chore: release v${{ steps.bump.outputs.version }}"
           git tag "v${{ steps.bump.outputs.version }}"
           git push origin HEAD --tags
@@ -61,11 +91,19 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG_INPUT: ${{ inputs.changelog }}
         run: |
+          # Build release notes from changelog input
+          NOTES=$(echo "$CHANGELOG_INPUT" | while IFS= read -r line; do
+            line=$(echo "$line" | sed 's/^[[:space:]]*//')
+            [ -z "$line" ] && continue
+            line=$(echo "$line" | sed 's/^[-*][[:space:]]*//')
+            echo "- $line"
+          done)
           gh release create "v${{ steps.bump.outputs.version }}" \
             *.vsix \
             --title "v${{ steps.bump.outputs.version }}" \
-            --generate-notes
+            --notes "$NOTES"
 
       - name: Publish to Marketplace
         if: env.VSCE_PAT != ''
