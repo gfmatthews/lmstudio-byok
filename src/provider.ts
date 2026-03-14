@@ -13,6 +13,36 @@ interface LMStudioModelsResponse {
 	data: LMStudioModel[];
 }
 
+/** Shape returned by the LM Studio native /api/v1/models endpoint. */
+interface LMStudioNativeModelInstance {
+	id: string;
+	config: {
+		context_length: number;
+		eval_batch_size?: number;
+		flash_attention?: boolean;
+		num_experts?: number;
+		offload_kv_cache_to_gpu?: boolean;
+	};
+}
+
+interface LMStudioNativeModel {
+	type: 'llm' | 'embedding';
+	publisher: string;
+	key: string;
+	display_name: string;
+	architecture?: string | null;
+	max_context_length: number;
+	loaded_instances: LMStudioNativeModelInstance[];
+	capabilities?: {
+		vision: boolean;
+		trained_for_tool_use: boolean;
+	};
+}
+
+interface LMStudioNativeModelsResponse {
+	models: LMStudioNativeModel[];
+}
+
 /** A single SSE delta from /v1/chat/completions (streaming). */
 interface ChatCompletionToolCallDelta {
 	index: number;
@@ -30,7 +60,7 @@ interface ChatCompletionChunk {
 	choices: ChatCompletionChunkChoice[];
 }
 
-function getChatModelInfo(id: string, name: string, maxInputTokens: number, maxOutputTokens: number, supportsTools = true): LanguageModelChatInformation {
+function getChatModelInfo(id: string, name: string, maxInputTokens: number, maxOutputTokens: number, supportsTools = true, imageInput = false): LanguageModelChatInformation {
 	return {
 		id,
 		name,
@@ -40,7 +70,7 @@ function getChatModelInfo(id: string, name: string, maxInputTokens: number, maxO
 		version: "1.0.0",
 		capabilities: {
 			toolCalling: supportsTools,
-			imageInput: false,
+			imageInput,
 		}
 	};
 }
@@ -154,6 +184,26 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		return headers;
 	}
 
+	/**
+	 * Try to fetch models from the native LM Studio REST API (`/api/v1/models`),
+	 * which includes the actually configured context length per loaded instance.
+	 * Returns null if the endpoint is unavailable (older LM Studio versions).
+	 */
+	private async fetchNativeModels(baseUrl: string): Promise<LMStudioNativeModelsResponse | null> {
+		try {
+			this.log(`Trying native API: ${baseUrl}/api/v1/models ...`);
+			const resp = await fetch(`${baseUrl}/api/v1/models`, { headers: this.buildHeaders() });
+			if (!resp.ok) {
+				this.log(`Native API returned HTTP ${resp.status}, falling back to OpenAI-compat endpoint`);
+				return null;
+			}
+			return (await resp.json()) as LMStudioNativeModelsResponse;
+		} catch (err) {
+			this.log(`Native API unavailable: ${err instanceof Error ? err.message : String(err)}`);
+			return null;
+		}
+	}
+
 	async provideLanguageModelChatInformation(_options: PrepareLanguageModelChatModelOptions, _token: CancellationToken): Promise<LanguageModelChatInformation[]> {
 		const now = Date.now();
 		if (this.cachedModels && (now - this.cacheTimestamp) < this.CACHE_DURATION) {
@@ -164,6 +214,36 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		const baseUrl = this.getBaseUrl();
 
 		try {
+			// Try the native REST API first — it exposes the actual configured context length
+			const nativeResponse = await this.fetchNativeModels(baseUrl);
+			if (nativeResponse) {
+				const models: LanguageModelChatInformation[] = [];
+				for (const m of nativeResponse.models) {
+					if (m.type !== 'llm') { continue; }
+					for (const instance of m.loaded_instances) {
+						const contextLength = instance.config.context_length;
+						const maxOutput = Math.min(8192, contextLength);
+						const supportsTools = m.capabilities?.trained_for_tool_use ?? true;
+						const supportsVision = m.capabilities?.vision ?? false;
+						this.log(`Adding model ${instance.id} (configured context: ${contextLength}, maxOutput: ${maxOutput}, tools: ${supportsTools}, vision: ${supportsVision})`);
+						models.push(getChatModelInfo(instance.id, instance.id, contextLength, maxOutput, supportsTools, supportsVision));
+					}
+				}
+
+				if (models.length > 0) {
+					this.log(`Native API: found ${models.length} loaded model(s)`);
+					this.cachedModels = models;
+					this.cacheTimestamp = now;
+					return models;
+				}
+
+				this.log('Native API: no loaded LLM instances found');
+				return [
+					getChatModelInfo("no-models-loaded", "📱 Load a Model in LM Studio", 32768, 8192, false),
+				];
+			}
+
+			// Fallback: OpenAI-compat /v1/models (older LM Studio versions)
 			this.log(`Fetching models from ${baseUrl}/v1/models ...`);
 			const resp = await fetch(`${baseUrl}/v1/models`, { headers: this.buildHeaders() });
 
@@ -173,10 +253,10 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 			}
 
 			const json = (await resp.json()) as LMStudioModelsResponse;
-			this.log(`Successfully connected! Found ${json.data.length} models`);
+			this.log(`Successfully connected! Found ${json.data.length} models (context length unavailable — using defaults)`);
 
 			const models: LanguageModelChatInformation[] = json.data.map(m => {
-				this.log(`Adding model ${m.id}`);
+				this.log(`Adding model ${m.id} (default context: 32768)`);
 				return getChatModelInfo(m.id, m.id, 32768, 8192, true);
 			});
 
