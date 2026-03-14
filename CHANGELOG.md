@@ -2,6 +2,12 @@
 
 All notable changes to the LM Studio BYOK Chat Provider extension will be documented in this file.
 
+## [0.3.0] - 2026-03-14
+
+- improved hardening of tool calling logic
+- now detects and reports context window size to vsCode based on configured LMStudio context window size
+
+
 ## [0.2.0] - 2026-03-13
 
 ### Added
