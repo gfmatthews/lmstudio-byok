@@ -614,7 +614,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 						fragmentCount++;
 
 						// Handle thinking mode - skip <think> content entirely
-						if (content === '<think>' || content === '<|channel|>analysis<|message|>') {
+						if (content === '<think>' || content === '<|channel|>analysis<|message|>' || content === '<|channel|>commentary<|message|>') {
 							skipThinkMode = true;
 							this.log(`Fragment skipped (start thinking): raw="${content}"`);
 							continue;
@@ -629,8 +629,9 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 
 						if (content === '<|channel|>final<|message|>' ||
 							content === '<|start|>assistant' ||
-							content === '<|end|>') {
-							this.log(`Fragment skipped (empty token): raw="${content}"`);
+							content === '<|end|>' ||
+							content.startsWith('<|channel|>')) {
+							this.log(`Fragment skipped (control token): raw="${content}"`);
 							continue;
 						}
 
