@@ -463,6 +463,10 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 				const BATCH_DELAY_MS = 100;
 				let fragmentCount = 0;
 
+				// Regex matching model control tokens: <|...|>, </think>, <think>,
+				// and model-internal function calls like task_complete{...} or task_complete<|...|>...
+				const CONTROL_TOKEN_RE = /<\|[^|]*\|>|<\/?think>|task_complete\s*(?:<\|[^|]*\|>|\{)[\s\S]*/g;
+
 				// Accumulate streamed tool call fragments by index
 				const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
@@ -613,35 +617,51 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 
 						fragmentCount++;
 
-						// Handle thinking mode - skip <think> content entirely
-						if (content === '<think>' || content === '<|channel|>analysis<|message|>' || content === '<|channel|>commentary<|message|>') {
+						// Handle thinking mode — skip <think> and non-final <|channel|> content
+						if (content === '<think>' ||
+							(content.startsWith('<|channel|>') && content !== '<|channel|>final<|message|>')) {
 							skipThinkMode = true;
-							this.log(`Fragment skipped (start thinking): raw="${content}"`);
+							this.log(`Fragment skipped (start thinking/non-final channel): raw="${content}"`);
 							continue;
-						} else if (content === '</think>' || content === '<|end|>') {
+						} else if (content === '</think>' ||
+							content === '<|channel|>final<|message|>') {
 							skipThinkMode = false;
-							this.log(`Fragment skipped (end thinking): raw="${content}"`);
+							this.log(`Fragment skipped (end thinking / final channel): raw="${content}"`);
+							continue;
+						} else if (content === '<|end|>') {
+							if (skipThinkMode) {
+								skipThinkMode = false;
+								this.log(`Fragment skipped (end thinking): raw="${content}"`);
+							} else {
+								this.log(`Fragment skipped (control token): raw="${content}"`);
+							}
 							continue;
 						} else if (skipThinkMode) {
 							this.log(`Fragment skipped (thinking mode): raw="${content}"`);
 							continue;
 						}
 
-						if (content === '<|channel|>final<|message|>' ||
-							content === '<|start|>assistant' ||
-							content === '<|end|>' ||
-							content.startsWith('<|channel|>')) {
+						if (content === '<|start|>assistant') {
 							this.log(`Fragment skipped (control token): raw="${content}"`);
 							continue;
 						}
 
-						if (content.length > 0) {
-							accumulatedContent += content;
+						// Strip any remaining control tokens that arrive embedded in content
+						const cleaned = content.replace(CONTROL_TOKEN_RE, '');
+						if (cleaned !== content) {
+							this.log(`Stripped control tokens: raw="${content}" -> "${cleaned}"`);
+						}
+						if (cleaned.length === 0) {
+							continue;
+						}
+
+						if (cleaned.length > 0) {
+							accumulatedContent += cleaned;
 
 							const now = Date.now();
 							const shouldFlush =
-								content.includes('\n\n') ||
-								content.includes('```') ||
+								cleaned.includes('\n\n') ||
+								cleaned.includes('```') ||
 								accumulatedContent.length >= 50 ||
 								(now - lastReportTime) >= BATCH_DELAY_MS ||
 								(fragmentCount % 10 === 0);
