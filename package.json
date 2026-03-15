@@ -36,7 +36,7 @@
 				{
 					"id": "lmstudio-explorer",
 					"title": "LM Studio",
-					"icon": "$(hubot)"
+					"icon": "$(chip)"
 				}
 			]
 		},
@@ -108,7 +108,13 @@
 					"scope": "application"
 				}
 			}
-		}
+		},
+		"viewsWelcome": [
+			{
+				"view": "lmstudioModels",
+				"contents": "No models detected running on your machine.\n\nStart the server, ensure it's configured in [extension settings](command:workbench.action.openSettings?%22lmstudio%22) and that you have a model loaded. Then hit refresh to load a model.\n\n[Refresh Models](command:lmstudio.refreshModels)"
+			}
+		]
 	},
 	"main": "./out/extension.js",
 	"scripts": {
