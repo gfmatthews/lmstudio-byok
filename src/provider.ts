@@ -1,4 +1,4 @@
-import { CancellationToken, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel, env } from "vscode";
+import { CancellationToken, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel, env, Memento } from "vscode";
 import { LanguageModelChatInformation, LanguageModelChatProvider, LanguageModelChatRequestMessage, LanguageModelResponsePart, ProvideLanguageModelChatResponseOptions, PrepareLanguageModelChatModelOptions } from "vscode";
 import { encode } from 'gpt-tokenizer';
 
@@ -82,10 +82,17 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 	private readonly CACHE_DURATION = 30000; // 30 seconds
 	private output: OutputChannel;
 	private verbose = false;
+	private hiddenModelIds: Set<string>;
+	private globalState: Memento | undefined;
+
+	private _onDidChangeVisibility = new EventEmitter<void>();
+	readonly onDidChangeVisibility = this._onDidChangeVisibility.event;
 
 	readonly onDidChangeLanguageModelChatInformation = this._onDidChange.event;
 
-	constructor() {
+	constructor(globalState?: Memento) {
+		this.globalState = globalState;
+		this.hiddenModelIds = new Set(globalState?.get<string[]>('lmstudio.hiddenModels', []) ?? []);
 		this.output = window.createOutputChannel('LM Studio');
 		this.loadVerbosity();
 		workspace.onDidChangeConfiguration((e: ConfigurationChangeEvent) => {
@@ -208,7 +215,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		const now = Date.now();
 		if (this.cachedModels && (now - this.cacheTimestamp) < this.CACHE_DURATION) {
 			this.log('Using cached models');
-			return this.cachedModels;
+			return this.filterVisibleModels(this.cachedModels);
 		}
 
 		const baseUrl = this.getBaseUrl();
@@ -234,7 +241,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 					this.log(`Native API: found ${models.length} loaded model(s)`);
 					this.cachedModels = models;
 					this.cacheTimestamp = now;
-					return models;
+					return this.filterVisibleModels(models);
 				}
 
 				this.log('Native API: no loaded LLM instances found');
@@ -263,7 +270,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 			if (models.length > 0) {
 				this.cachedModels = models;
 				this.cacheTimestamp = now;
-				return models;
+				return this.filterVisibleModels(models);
 			}
 
 			this.log('No models are currently loaded in LM Studio');
@@ -294,11 +301,52 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		}
 	}
 
+	/** Filter models to only those the user has not hidden. */
+	private filterVisibleModels(models: LanguageModelChatInformation[]): LanguageModelChatInformation[] {
+		if (this.hiddenModelIds.size === 0) {
+			return models;
+		}
+		return models.filter(m => !this.hiddenModelIds.has(m.id));
+	}
+
 	public refreshModels(): void {
 		console.log('LM Studio: Manually refreshing model cache');
 		this.cachedModels = null;
 		this.cacheTimestamp = 0;
 		this._onDidChange.fire();
+	}
+
+	/**
+	 * Return all discovered models regardless of visibility.
+	 * Used by the tree view to show the complete list.
+	 */
+	public async getAllModels(): Promise<LanguageModelChatInformation[]> {
+		const now = Date.now();
+		if (this.cachedModels && (now - this.cacheTimestamp) < this.CACHE_DURATION) {
+			return this.cachedModels;
+		}
+		// Trigger a fetch so the cache is populated.
+		await this.provideLanguageModelChatInformation({ silent: true }, { isCancellationRequested: false, onCancellationRequested: new EventEmitter<void>().event } as CancellationToken);
+		return this.cachedModels ?? [];
+	}
+
+	/** Check whether a model is visible in the Copilot chat picker. */
+	public isModelVisible(modelId: string): boolean {
+		return !this.hiddenModelIds.has(modelId);
+	}
+
+	/** Toggle the visibility of a model and persist the choice. */
+	public toggleModelVisibility(modelId: string): void {
+		if (this.hiddenModelIds.has(modelId)) {
+			this.hiddenModelIds.delete(modelId);
+			this.log(`Model ${modelId} is now visible`);
+		} else {
+			this.hiddenModelIds.add(modelId);
+			this.log(`Model ${modelId} is now hidden`);
+		}
+		this.globalState?.update('lmstudio.hiddenModels', [...this.hiddenModelIds]);
+		this._onDidChange.fire();
+		this._onDidChangeVisibility.fire();
 	}
 
 	async provideLanguageModelChatResponse(

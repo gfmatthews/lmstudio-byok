@@ -1,8 +1,10 @@
 import * as vscode from 'vscode';
 import { LMStudioChatModelProvider } from './provider';
+import { LMStudioModelTreeProvider, ModelTreeItem } from './treeView';
 
 export function activate(context: vscode.ExtensionContext) {
 	let provider: LMStudioChatModelProvider | null = null;
+	let treeProvider: LMStudioModelTreeProvider | null = null;
 
 	// Register commands first so they are always available.
 	context.subscriptions.push(
@@ -18,6 +20,7 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 			provider.refreshModels();
+			treeProvider?.refresh();
 			vscode.window.showInformationMessage('LM Studio models refreshed');
 		})
 	);
@@ -42,13 +45,32 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
+	context.subscriptions.push(
+		vscode.commands.registerCommand('lmstudio.toggleModelVisibility', (item: ModelTreeItem) => {
+			if (!provider) { return; }
+			provider.toggleModelVisibility(item.modelId);
+		})
+	);
+
 	// Create the provider.
 	try {
-		provider = new LMStudioChatModelProvider();
+		provider = new LMStudioChatModelProvider(context.globalState);
 	} catch (error) {
 		vscode.window.showErrorMessage(
 			`LM Studio: Failed to initialize provider. Error: ${error}`
 		);
+	}
+
+	// Register the tree view.
+	if (provider) {
+		treeProvider = new LMStudioModelTreeProvider(provider);
+		const treeView = vscode.window.createTreeView('lmstudioModels', {
+			treeDataProvider: treeProvider,
+		});
+		context.subscriptions.push(treeView);
+
+		// Refresh tree when model visibility changes.
+		provider.onDidChangeVisibility(() => treeProvider?.refresh());
 	}
 
 	// Register the chat model provider with VS Code.
