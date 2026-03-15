@@ -21,7 +21,8 @@
 		"onStartupFinished",
 		"onCommand:lmstudio.refreshModels",
 		"onCommand:lmstudio.testConnection",
-		"onCommand:lmstudio.showWelcome"
+		"onCommand:lmstudio.showWelcome",
+		"onView:lmstudioModels"
 	],
 	"contributes": {
 		"languageModelChatProviders": [
@@ -30,11 +31,29 @@
 				"displayName": "LM Studio"
 			}
 		],
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "lmstudio-explorer",
+					"title": "LM Studio",
+					"icon": "$(chip)"
+				}
+			]
+		},
+		"views": {
+			"lmstudio-explorer": [
+				{
+					"id": "lmstudioModels",
+					"name": "Models"
+				}
+			]
+		},
 		"commands": [
 			{
 				"command": "lmstudio.refreshModels",
 				"title": "Refresh Available Models",
-				"category": "LM Studio"
+				"category": "LM Studio",
+				"icon": "$(refresh)"
 			},
 			{
 				"command": "lmstudio.testConnection",
@@ -45,8 +64,30 @@
 				"command": "lmstudio.showWelcome",
 				"title": "Show Welcome",
 				"category": "LM Studio"
+			},
+			{
+				"command": "lmstudio.toggleModelVisibility",
+				"title": "Toggle Model Visibility",
+				"category": "LM Studio",
+				"icon": "$(eye)"
 			}
 		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "lmstudio.refreshModels",
+					"when": "view == lmstudioModels",
+					"group": "navigation"
+				}
+			],
+			"view/item/context": [
+				{
+					"command": "lmstudio.toggleModelVisibility",
+					"when": "view == lmstudioModels",
+					"group": "inline"
+				}
+			]
+		},
 		"configuration": {
 			"title": "LM Studio",
 			"properties": {
@@ -67,7 +108,13 @@
 					"scope": "application"
 				}
 			}
-		}
+		},
+		"viewsWelcome": [
+			{
+				"view": "lmstudioModels",
+				"contents": "No models detected running on your machine.\n\nStart the server, ensure it's configured in [extension settings](command:workbench.action.openSettings?%22lmstudio%22) and that you have a model loaded. Then hit refresh to load a model.\n\n[Refresh Models](command:lmstudio.refreshModels)"
+			}
+		]
 	},
 	"main": "./out/extension.js",
 	"scripts": {
