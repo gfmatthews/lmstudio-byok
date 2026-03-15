@@ -1,8 +1,8 @@
 {
 	"name": "lmstudio-byok-chat-provider",
 	"publisher": "NullSetIndustries",
-	"displayName": "LM Studio BYOK Chat Provider",
-	"description": "Bring your own LM Studio instance to use local LLM models in GitHub Copilot Chat.",
+	"displayName": "LM Studio Copilot Chat Provider",
+	"description": "Use LM Studio models on your local machine with VSCode Copilot Chat.",
 	"license": "MIT",
 	"icon": "assets/LogoV1.png",
 	"repository": {

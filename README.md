@@ -1,4 +1,4 @@
-# LM Studio BYOK Chat Provider
+# LM Studio Copilot Chat Provider
 
 This VS Code extension provides access to local LLM models running in LM Studio through VS Code's Language Model API, allowing you to use local models with GitHub Copilot Chat and other VS Code AI features.
 
