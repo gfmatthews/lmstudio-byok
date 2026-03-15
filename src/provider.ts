@@ -1,4 +1,4 @@
-import { CancellationToken, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel, env, Memento } from "vscode";
+import { CancellationToken, CancellationTokenSource, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel, env, Memento } from "vscode";
 import { LanguageModelChatInformation, LanguageModelChatProvider, LanguageModelChatRequestMessage, LanguageModelResponsePart, ProvideLanguageModelChatResponseOptions, PrepareLanguageModelChatModelOptions } from "vscode";
 import { encode } from 'gpt-tokenizer';
 
@@ -326,7 +326,12 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 			return this.cachedModels;
 		}
 		// Trigger a fetch so the cache is populated.
-		await this.provideLanguageModelChatInformation({ silent: true }, { isCancellationRequested: false, onCancellationRequested: new EventEmitter<void>().event } as CancellationToken);
+		const cts = new CancellationTokenSource();
+		try {
+			await this.provideLanguageModelChatInformation({ silent: true }, cts.token);
+		} finally {
+			cts.dispose();
+		}
 		return this.cachedModels ?? [];
 	}
 

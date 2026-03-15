@@ -70,7 +70,7 @@ export function activate(context: vscode.ExtensionContext) {
 		context.subscriptions.push(treeView);
 
 		// Refresh tree when model visibility changes.
-		provider.onDidChangeVisibility(() => treeProvider?.refresh());
+		context.subscriptions.push(provider.onDidChangeVisibility(() => treeProvider?.refresh()));
 	}
 
 	// Register the chat model provider with VS Code.
