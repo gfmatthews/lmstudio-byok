@@ -354,6 +354,15 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		this._onDidChangeVisibility.fire();
 	}
 
+	/** Safely parse a tool call's JSON arguments, returning {} on failure. */
+	private parseToolArguments(raw: string): object {
+		try {
+			return JSON.parse(raw) as object;
+		} catch {
+			return {};
+		}
+	}
+
 	async provideLanguageModelChatResponse(
 		model: LanguageModelChatInformation,
 		messages: readonly LanguageModelChatRequestMessage[],
@@ -365,7 +374,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		const started = Date.now();
 		this.log(`Chat request started with model='${model.id}' messages=${messages.length} maxTokens=${options.modelOptions?.maxTokens}`);
 
-		if (model.id === "no-models-loaded" || model.id === "connection-error" || model.id === "server-not-started") {
+		if (model.id === "no-models-loaded" || model.id === "connection-error") {
 			progress.report(
 				new LanguageModelTextPart(
 					"🚨 **LM Studio Server Not Started or No Model Loaded**\n\n" +
@@ -523,6 +532,35 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 				// Accumulate streamed tool call fragments by index
 				const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
+				/** Merge incoming tool-call deltas into pendingToolCalls. */
+				const accumulateToolCallDeltas = (deltas: ChatCompletionToolCallDelta[]) => {
+					for (const tc of deltas) {
+						const existing = pendingToolCalls.get(tc.index);
+						if (existing) {
+							if (tc.function?.arguments) {
+								existing.arguments += tc.function.arguments;
+							}
+						} else {
+							pendingToolCalls.set(tc.index, {
+								id: tc.id || `call_${tc.index}`,
+								name: tc.function?.name || '',
+								arguments: tc.function?.arguments || '',
+							});
+						}
+					}
+				};
+
+				/** Emit all pending tool calls as LanguageModelToolCallParts, then clear. */
+				const emitPendingToolCalls = (label: string) => {
+					flushContent();
+					for (const [, tc] of pendingToolCalls) {
+						const input = this.parseToolArguments(tc.arguments);
+						this.log(`Emitting tool call (${label}): id=${tc.id} name=${tc.name} args=${tc.arguments.substring(0, 80)}`);
+						progress.report(new LanguageModelToolCallPart(tc.id, tc.name, input));
+					}
+					pendingToolCalls.clear();
+				};
+
 				// Regex to detect tool calls emitted as plain text by models that don't
 				// use the structured tool_calls delta (e.g. "functionName[ARGS]{...json...}")
 				const TEXT_TOOL_CALL_RE = /([a-zA-Z_][\w]*)\[ARGS\](\{[\s\S]*\})\s*$/;
@@ -628,36 +666,12 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 
 						// Accumulate tool call deltas
 						if (choice.delta?.tool_calls) {
-							for (const tc of choice.delta.tool_calls) {
-								const existing = pendingToolCalls.get(tc.index);
-								if (existing) {
-									if (tc.function?.arguments) {
-										existing.arguments += tc.function.arguments;
-									}
-								} else {
-									pendingToolCalls.set(tc.index, {
-										id: tc.id || `call_${tc.index}`,
-										name: tc.function?.name || '',
-										arguments: tc.function?.arguments || '',
-									});
-								}
-							}
+							accumulateToolCallDeltas(choice.delta.tool_calls);
 						}
 
 						// Emit tool calls when finish_reason indicates tool_calls
 						if (choice.finish_reason === 'tool_calls' && pendingToolCalls.size > 0) {
-							flushContent();
-							for (const [, tc] of pendingToolCalls) {
-								let input: object;
-								try {
-									input = JSON.parse(tc.arguments) as object;
-								} catch {
-									input = {};
-								}
-								this.log(`Emitting tool call: id=${tc.id} name=${tc.name} args=${tc.arguments.substring(0, 80)}`);
-								progress.report(new LanguageModelToolCallPart(tc.id, tc.name, input));
-							}
-							pendingToolCalls.clear();
+							emitPendingToolCalls('finish_reason');
 						}
 
 						const content = choice.delta?.content;
@@ -708,21 +722,19 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 							continue;
 						}
 
-						if (cleaned.length > 0) {
-							accumulatedContent += cleaned;
+						accumulatedContent += cleaned;
 
-							const now = Date.now();
-							const shouldFlush =
-								cleaned.includes('\n\n') ||
-								cleaned.includes('```') ||
-								accumulatedContent.length >= 50 ||
-								(now - lastReportTime) >= BATCH_DELAY_MS ||
-								(fragmentCount % 10 === 0);
+						const now = Date.now();
+						const shouldFlush =
+							cleaned.includes('\n\n') ||
+							cleaned.includes('```') ||
+							accumulatedContent.length >= 50 ||
+							(now - lastReportTime) >= BATCH_DELAY_MS ||
+							(fragmentCount % 10 === 0);
 
-							if (shouldFlush) {
-								flushContent();
-								lastReportTime = now;
-							}
+						if (shouldFlush) {
+							flushContent();
+							lastReportTime = now;
 						}
 					}
 				}
@@ -738,30 +750,12 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 							if (content && !skipThinkMode) {
 								accumulatedContent += content;
 							}
-							// Handle any final tool call deltas in the remaining buffer
 							const choice = chunk.choices?.[0];
 							if (choice?.delta?.tool_calls) {
-								for (const tc of choice.delta.tool_calls) {
-									const existing = pendingToolCalls.get(tc.index);
-									if (existing) {
-										if (tc.function?.arguments) { existing.arguments += tc.function.arguments; }
-									} else {
-										pendingToolCalls.set(tc.index, {
-											id: tc.id || `call_${tc.index}`,
-											name: tc.function?.name || '',
-											arguments: tc.function?.arguments || '',
-										});
-									}
-								}
+								accumulateToolCallDeltas(choice.delta.tool_calls);
 							}
-							if (choice.finish_reason === 'tool_calls') {
-								for (const [, tc] of pendingToolCalls) {
-									let input: object;
-									try { input = JSON.parse(tc.arguments) as object; } catch { input = {}; }
-									this.log(`Emitting tool call (remaining buffer): id=${tc.id} name=${tc.name}`);
-									progress.report(new LanguageModelToolCallPart(tc.id, tc.name, input));
-								}
-								pendingToolCalls.clear();
+							if (choice?.finish_reason === 'tool_calls' && pendingToolCalls.size > 0) {
+								emitPendingToolCalls('remaining buffer');
 							}
 						} catch {
 							this.log(`Skipping unparseable remaining buffer: ${remaining.substring(0, 80)}`);
@@ -771,14 +765,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 
 				// Emit any pending tool calls that weren't flushed (e.g. if finish_reason was missed)
 				if (pendingToolCalls.size > 0) {
-					flushContent();
-					for (const [, tc] of pendingToolCalls) {
-						let input: object;
-						try { input = JSON.parse(tc.arguments) as object; } catch { input = {}; }
-						this.log(`Emitting tool call (stream end): id=${tc.id} name=${tc.name}`);
-						progress.report(new LanguageModelToolCallPart(tc.id, tc.name, input));
-					}
-					pendingToolCalls.clear();
+					emitPendingToolCalls('stream end');
 				}
 
 				flushContent();
@@ -821,27 +808,15 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 	}
 
 	async provideTokenCount(_model: LanguageModelChatInformation, text: string | LanguageModelChatRequestMessage, _token: CancellationToken): Promise<number> {
-		try {
-			let content: string;
-			if (typeof text === 'string') {
-				content = text;
-			} else {
-				content = text.content
-					.map(part => part instanceof LanguageModelTextPart ? part.value : '')
-					.join('');
-			}
+		const content = typeof text === 'string'
+			? text
+			: text.content
+				.map(part => part instanceof LanguageModelTextPart ? part.value : '')
+				.join('');
 
-			const tokens = encode(content);
-			return tokens.length;
+		try {
+			return encode(content).length;
 		} catch {
-			let content: string;
-			if (typeof text === 'string') {
-				content = text;
-			} else {
-				content = text.content
-					.map(part => part instanceof LanguageModelTextPart ? part.value : '')
-					.join('');
-			}
 			return Math.ceil(content.length / 4);
 		}
 	}

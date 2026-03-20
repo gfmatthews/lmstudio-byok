@@ -34,7 +34,7 @@ export function activate(context: vscode.ExtensionContext) {
 			try {
 				const models = await provider.provideLanguageModelChatInformation({ silent: false }, new vscode.CancellationTokenSource().token);
 
-				if (models.some(m => m.id === 'connection-error' || m.id === 'no-models-loaded' || m.id === 'server-not-started')) {
+				if (models.some(m => m.id === 'connection-error' || m.id === 'no-models-loaded')) {
 					vscode.window.showErrorMessage(`LM Studio connection failed. Found: ${models.map(m => m.name).join(', ')}`);
 				} else {
 					vscode.window.showInformationMessage(`LM Studio connected successfully! Found ${models.length} models: ${models.map(m => m.name).join(', ')}`);
