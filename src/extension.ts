@@ -14,6 +14,12 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('lmstudio.openSettings', () => {
+			vscode.commands.executeCommand('workbench.action.openSettings', '@ext:NullSetIndustries.lmstudio-byok-chat-provider');
+		})
+	);
+
+	context.subscriptions.push(
 		vscode.commands.registerCommand('lmstudio.refreshModels', () => {
 			if (!provider) {
 				vscode.window.showErrorMessage('LM Studio: Provider not initialized. Check the "LM Studio" output channel for details.');
