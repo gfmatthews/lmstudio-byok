@@ -70,12 +70,23 @@
 				"title": "Toggle Model Visibility",
 				"category": "LM Studio",
 				"icon": "$(eye)"
+			},
+			{
+				"command": "lmstudio.openSettings",
+				"title": "Open Settings",
+				"category": "LM Studio",
+				"icon": "$(gear)"
 			}
 		],
 		"menus": {
 			"view/title": [
 				{
 					"command": "lmstudio.refreshModels",
+					"when": "view == lmstudioModels",
+					"group": "navigation"
+				},
+				{
+					"command": "lmstudio.openSettings",
 					"when": "view == lmstudioModels",
 					"group": "navigation"
 				}
@@ -112,7 +123,7 @@
 		"viewsWelcome": [
 			{
 				"view": "lmstudioModels",
-				"contents": "No models detected running on your machine.\n\nStart the server, ensure it's configured in [extension settings](command:workbench.action.openSettings?%22lmstudio%22) and that you have a model loaded. Then hit refresh to load a model.\n\n[Refresh Models](command:lmstudio.refreshModels)"
+				"contents": "No models detected running on your machine.\n\nStart the server, ensure it's configured in [extension settings](command:lmstudio.openSettings) and that you have a model loaded. Then hit refresh to load a model.\n\n[Refresh Models](command:lmstudio.refreshModels)"
 			}
 		]
 	},
