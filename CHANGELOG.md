@@ -2,6 +2,11 @@
 
 All notable changes to the LM Studio BYOK Chat Provider extension will be documented in this file.
 
+## [0.3.5] - 2026-04-17
+
+- minor reliability updates
+
+
 ## [0.3.4] - 2026-03-21
 
 - adds a shortcut to launch extension settings from the UI
