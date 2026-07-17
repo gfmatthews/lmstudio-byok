@@ -37,8 +37,9 @@ export function activate(context: vscode.ExtensionContext) {
 				vscode.window.showErrorMessage('LM Studio: Provider not initialized. Check the "LM Studio" output channel for details.');
 				return;
 			}
+			const cts = new vscode.CancellationTokenSource();
 			try {
-				const models = await provider.provideLanguageModelChatInformation({ silent: false }, new vscode.CancellationTokenSource().token);
+				const models = await provider.provideLanguageModelChatInformation({ silent: false }, cts.token);
 
 				if (models.some(m => m.id === 'connection-error' || m.id === 'no-models-loaded')) {
 					vscode.window.showErrorMessage(`LM Studio connection failed. Found: ${models.map(m => m.name).join(', ')}`);
@@ -47,6 +48,8 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 			} catch (error) {
 				vscode.window.showErrorMessage(`LM Studio connection test failed: ${error}`);
+			} finally {
+				cts.dispose();
 			}
 		})
 	);
@@ -61,6 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// Create the provider.
 	try {
 		provider = new LMStudioChatModelProvider(context.globalState);
+		context.subscriptions.push(provider);
 	} catch (error) {
 		vscode.window.showErrorMessage(
 			`LM Studio: Failed to initialize provider. Error: ${error}`

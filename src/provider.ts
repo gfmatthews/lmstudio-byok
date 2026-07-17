@@ -1,4 +1,4 @@
-import { CancellationToken, CancellationTokenSource, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, EventEmitter, window, OutputChannel, env, Memento } from "vscode";
+import { CancellationToken, CancellationTokenSource, LanguageModelChatMessageRole, LanguageModelChatToolMode, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, Progress, workspace, ConfigurationChangeEvent, Disposable, EventEmitter, window, OutputChannel, env, Memento } from "vscode";
 import { LanguageModelChatInformation, LanguageModelChatProvider, LanguageModelChatRequestMessage, LanguageModelResponsePart, ProvideLanguageModelChatResponseOptions, PrepareLanguageModelChatModelOptions } from "vscode";
 import { encode } from 'gpt-tokenizer';
 
@@ -75,7 +75,7 @@ function getChatModelInfo(id: string, name: string, maxInputTokens: number, maxO
 	};
 }
 
-export class LMStudioChatModelProvider implements LanguageModelChatProvider {
+export class LMStudioChatModelProvider implements LanguageModelChatProvider, Disposable {
 	private _onDidChange = new EventEmitter<void>();
 	private cachedModels: LanguageModelChatInformation[] | null = null;
 	private cacheTimestamp = 0;
@@ -84,6 +84,7 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 	private verbose = false;
 	private hiddenModelIds: Set<string>;
 	private globalState: Memento | undefined;
+	private readonly disposables: Disposable[];
 
 	private _onDidChangeVisibility = new EventEmitter<void>();
 	readonly onDidChangeVisibility = this._onDidChangeVisibility.event;
@@ -94,8 +95,9 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 		this.globalState = globalState;
 		this.hiddenModelIds = new Set(globalState?.get<string[]>('lmstudio.hiddenModels', []) ?? []);
 		this.output = window.createOutputChannel('LM Studio');
+		this.disposables = [this.output, this._onDidChange, this._onDidChangeVisibility];
 		this.loadVerbosity();
-		workspace.onDidChangeConfiguration((e: ConfigurationChangeEvent) => {
+		this.disposables.push(workspace.onDidChangeConfiguration((e: ConfigurationChangeEvent) => {
 			if (e.affectsConfiguration('lmstudio.baseUrl') || e.affectsConfiguration('lmstudio.apiKey') || e.affectsConfiguration('lmstudio.verboseLogging')) {
 				this.log('Configuration changed, clearing cache');
 				this.loadVerbosity();
@@ -103,7 +105,13 @@ export class LMStudioChatModelProvider implements LanguageModelChatProvider {
 				this.cacheTimestamp = 0;
 				this._onDidChange.fire();
 			}
-		});
+		}));
+	}
+
+	dispose(): void {
+		for (const disposable of this.disposables) {
+			disposable.dispose();
+		}
 	}
 
 	private loadVerbosity() {
